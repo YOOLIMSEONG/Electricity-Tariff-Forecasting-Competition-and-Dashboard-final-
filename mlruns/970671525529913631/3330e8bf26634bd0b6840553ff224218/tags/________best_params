@@ -1,0 +1,1 @@
+{'n_layers': 2, 'units': 96, 'dropout': 0.1, 'n_heads': 2, 'seq_len': 24, 'lr': 0.0014709120396864228, 'batch_size': 16, 'epochs': 30}

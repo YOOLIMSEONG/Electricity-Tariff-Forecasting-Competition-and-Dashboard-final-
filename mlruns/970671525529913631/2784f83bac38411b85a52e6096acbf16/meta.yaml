@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/kbk29/Desktop/portfolio/mlruns/970671525529913631/2784f83bac38411b85a52e6096acbf16/artifacts
+end_time: 1761533639676
+entry_point_name: ''
+experiment_id: '970671525529913631'
+lifecycle_stage: active
+run_id: 2784f83bac38411b85a52e6096acbf16
+run_name: 지상역률(%)_run
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1761533425212
+status: 3
+tags: []
+user_id: kbk29

@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/kbk29/Desktop/portfolio/mlruns/970671525529913631/d3b40ceb8aa2406fa80a6ceaedf8b604/artifacts
+end_time: 1761498309749
+entry_point_name: ''
+experiment_id: '970671525529913631'
+lifecycle_stage: active
+run_id: d3b40ceb8aa2406fa80a6ceaedf8b604
+run_name: 지상무효전력량(kVarh)_run
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1761497906948
+status: 3
+tags: []
+user_id: kbk29

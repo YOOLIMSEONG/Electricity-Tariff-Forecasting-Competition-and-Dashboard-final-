@@ -1,0 +1,216 @@
+---
+title: "LS 전력 사용량 기반 전기요금 예측 - 데이터 탐색"
+author: "김동균"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    theme: cosmo
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{python}
+
+# electricity_forecast_lstm_optuna.py
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_absolute_error
+import optuna
+import os
+
+# ==============================================
+# 1️⃣ 데이터 로드
+# ==============================================
+train_path = "./data/fixed_train_clean.csv"
+test_path = "./data/fixed_test_weather_full.csv"
+
+train = pd.read_csv(train_path)
+test = pd.read_csv(test_path)
+
+# ==============================================
+# 2️⃣ 설정
+# ==============================================
+TARGETS_STEP1 = [
+    "전력사용량(kWh)",
+    "지상무효전력량(kVarh)",
+    "진상무효전력량(kVarh)",
+    "지상역률(%)",
+    "진상역률(%)"
+]
+TARGET_STEP2 = "전기요금(원)"
+
+TIME_FEATURES = ["sin_day", "cos_day", "day_of_week", "is_weekend", "is_holiday"]
+WEATHER_FEATURES = ["기온", "습도", "풍속", "강수량"]
+
+# ==============================================
+# 3️⃣ 시계열 시퀀스 생성 함수
+# ==============================================
+def create_sequences(X, y, seq_len):
+    Xs, ys = [], []
+    for i in range(len(X) - seq_len):
+        Xs.append(X[i:i+seq_len])
+        ys.append(y[i+seq_len])
+    return np.array(Xs), np.array(ys)
+
+# ==============================================
+# 4️⃣ 모델 정의 함수
+# ==============================================
+def build_lstm_model(input_shape, output_dim, params):
+    model = Sequential([
+        LSTM(params["units1"], activation="tanh", return_sequences=True, input_shape=input_shape),
+        Dropout(params["dropout"]),
+        LSTM(params["units2"], activation="tanh"),
+        Dropout(params["dropout"]),
+        Dense(output_dim)
+    ])
+    opt = tf.keras.optimizers.Adam(learning_rate=params["lr"])
+    model.compile(optimizer=opt, loss="mae")
+    return model
+
+# ==============================================
+# 5️⃣ Optuna 목적 함수
+# ==============================================
+def objective(trial, X, y):
+    seq_len = trial.suggest_int("seq_len", 12, 48)
+    params = {
+        "units1": trial.suggest_int("units1", 32, 128),
+        "units2": trial.suggest_int("units2", 16, 64),
+        "dropout": trial.suggest_float("dropout", 0.1, 0.4),
+        "lr": trial.suggest_float("lr", 1e-4, 1e-2, log=True),
+        "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
+        "epochs": trial.suggest_int("epochs", 30, 100),
+    }
+
+    tscv = TimeSeriesSplit(n_splits=3)
+    maes = []
+
+    for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
+        X_train, y_train = X[train_idx], y[train_idx]
+        X_val, y_val = X[val_idx], y[val_idx]
+
+        X_train_seq, y_train_seq = create_sequences(X_train, y_train, seq_len)
+        X_val_seq, y_val_seq = create_sequences(X_val, y_val, seq_len)
+
+        model = build_lstm_model((seq_len, X.shape[1]), 1, params)
+        callbacks = [
+            EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True),
+            ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=5, min_lr=1e-5),
+        ]
+        model.fit(
+            X_train_seq, y_train_seq,
+            validation_data=(X_val_seq, y_val_seq),
+            epochs=params["epochs"],
+            batch_size=params["batch_size"],
+            verbose=0,
+            callbacks=callbacks
+        )
+
+        y_pred = model.predict(X_val_seq, verbose=0)
+        mae = mean_absolute_error(y_val_seq, y_pred)
+        maes.append(mae)
+
+    return np.mean(maes)
+
+# ==============================================
+# 6️⃣ Step1: 전력 피처 예측
+# ==============================================
+X_base = train[TIME_FEATURES + WEATHER_FEATURES].values
+scaler_X = StandardScaler()
+X_scaled = scaler_X.fit_transform(X_base)
+
+models_step1 = {}
+preds_step1 = pd.DataFrame(index=train.index)
+
+for target in TARGETS_STEP1:
+    print(f"\n⚡ Step1 Target 튜닝 중: {target}")
+    y = train[target].values
+    scaler_y = StandardScaler()
+    y_scaled = scaler_y.fit_transform(y.reshape(-1, 1))
+
+    # Optuna 튜닝
+    study = optuna.create_study(direction="minimize")
+    study.optimize(lambda trial: objective(trial, X_scaled, y_scaled), n_trials=20, show_progress_bar=True)
+    best_params = study.best_params
+    print(f"✅ Best params ({target}):", best_params)
+
+    seq_len = best_params["seq_len"]
+    X_seq, y_seq = create_sequences(X_scaled, y_scaled, seq_len)
+
+    model = build_lstm_model((seq_len, X_scaled.shape[1]), 1, best_params)
+    model.fit(
+        X_seq, y_seq,
+        epochs=best_params["epochs"],
+        batch_size=best_params["batch_size"],
+        verbose=1,
+        callbacks=[
+            EarlyStopping(monitor="loss", patience=10, restore_best_weights=True),
+            ReduceLROnPlateau(monitor="loss", factor=0.5, patience=5)
+        ]
+    )
+
+    preds_scaled = model.predict(X_seq)
+    preds_step1[target + "_pred"] = scaler_y.inverse_transform(preds_scaled).flatten()
+    models_step1[target] = (model, scaler_y, best_params)
+
+# ==============================================
+# 7️⃣ Step1 파생 피처 계산
+# ==============================================
+df = preds_step1.copy()
+df["pf_diff"] = abs(df["지상역률(%)_pred"] - df["진상역률(%)_pred"])
+df["efficiency_ratio"] = df["전력사용량(kWh)_pred"] / (
+    (df["전력사용량(kWh)_pred"]**2 +
+     (df["지상무효전력량(kVarh)_pred"] - df["진상무효전력량(kVarh)_pred"])**2) ** 0.5 + 1e-6
+)
+
+# ==============================================
+# 8️⃣ Step2: 전기요금 예측
+# ==============================================
+X2 = np.concatenate([X_scaled[len(X_scaled)-len(df):], df.values], axis=1)
+y2 = train[TARGET_STEP2].values[len(train)-len(df):]
+scaler_y2 = StandardScaler()
+y2_scaled = scaler_y2.fit_transform(y2.reshape(-1, 1))
+
+print("\n⚡ Step2: 전기요금 예측 튜닝 중...")
+study2 = optuna.create_study(direction="minimize")
+study2.optimize(lambda trial: objective(trial, X2, y2_scaled), n_trials=20, show_progress_bar=True)
+best_params2 = study2.best_params
+print(f"✅ Best params (전기요금):", best_params2)
+
+seq_len2 = best_params2["seq_len"]
+X2_seq, y2_seq = create_sequences(X2, y2_scaled, seq_len2)
+
+model_step2 = build_lstm_model((seq_len2, X2.shape[1]), 1, best_params2)
+model_step2.fit(
+    X2_seq, y2_seq,
+    epochs=best_params2["epochs"],
+    batch_size=best_params2["batch_size"],
+    verbose=1,
+    callbacks=[
+        EarlyStopping(monitor="loss", patience=10, restore_best_weights=True),
+        ReduceLROnPlateau(monitor="loss", factor=0.5, patience=5)
+    ]
+)
+
+# 최종 예측
+pred_y2_scaled = model_step2.predict(X2_seq)
+pred_y2 = scaler_y2.inverse_transform(pred_y2_scaled).flatten()
+
+train["전기요금(원)_pred"] = np.nan
+train.iloc[-len(pred_y2):, train.columns.get_loc("전기요금(원)_pred")] = pred_y2
+
+print("\n✅ 전체 파이프라인 완료 (MAE 기준 튜닝)")
+print(train[["전기요금(원)", "전기요금(원)_pred"]].tail(10))
+
+
+```

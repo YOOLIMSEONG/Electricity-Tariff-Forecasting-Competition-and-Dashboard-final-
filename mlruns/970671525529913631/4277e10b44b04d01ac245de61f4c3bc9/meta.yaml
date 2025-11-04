@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/kbk29/Desktop/portfolio/mlruns/970671525529913631/4277e10b44b04d01ac245de61f4c3bc9/artifacts
+end_time: 1761537262591
+entry_point_name: ''
+experiment_id: '970671525529913631'
+lifecycle_stage: active
+run_id: 4277e10b44b04d01ac245de61f4c3bc9
+run_name: Stage1_Full_Run
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1761535686645
+status: 4
+tags: []
+user_id: kbk29

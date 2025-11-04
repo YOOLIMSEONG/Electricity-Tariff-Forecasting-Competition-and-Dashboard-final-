@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/kbk29/Desktop/portfolio/mlruns/970671525529913631/31ab5f17cc2b437da3f2f606cbd49fc6/artifacts
+end_time: 1761539151346
+entry_point_name: ''
+experiment_id: '970671525529913631'
+lifecycle_stage: active
+run_id: 31ab5f17cc2b437da3f2f606cbd49fc6
+run_name: 전력사용량(kWh)_trial
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1761538832660
+status: 3
+tags: []
+user_id: kbk29

@@ -1,0 +1,346 @@
+---
+title: "LS 전력 사용량 기반 전기요금 예측 - 데이터 탐색"
+author: "김동균"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    theme: cosmo
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+#  프로젝트 개요
+
+이 문서는 **LS 전력 사용량 기반 전기요금 예측 대회**의 첫 번째 단계로,  
+기본 데이터셋 구조 및 결측치, 이상치, 통계적 특징 등을 확인하기 위한 데이터 탐색(EDA) 목적을 가진다.
+
+---
+
+#  라이브러리 불러오기
+
+```{python}
+import pandas as pd
+import numpy as np
+import holidays
+
+# 데이터 로드
+train = pd.read_csv("./data/train.csv")
+
+# 데이터 크기 확인
+print("데이터 크기:", train.shape)
+print(train.head())
+```
+
+# 시간 외생 변수
+
+## 주기성 인코딩 (일/주 주기)
+
+```{python}
+
+df = pd.read_csv("./data/test.csv")
+
+# 날짜형으로 변환
+
+df["측정일시"] = pd.to_datetime(df["측정일시"])
+df = df.sort_values("측정일시").reset_index(drop=True)
+
+print("✅ 데이터 크기:", df.shape)
+df.head(3)
+#날짜형으로 변환
+
+df["측정일시"] = pd.to_datetime(df["측정일시"])
+df = df.sort_values("측정일시").reset_index(drop=True)
+
+df["year"] = df["측정일시"].dt.year
+df["month"] = df["측정일시"].dt.month
+df["day"] = df["측정일시"].dt.day
+df["hour"] = df["측정일시"].dt.hour
+df["minute"] = df["측정일시"].dt.minute
+
+# 요일, 주말 여부
+
+df["day_of_week"] = df["측정일시"].dt.dayofweek  # 0=월, 6=일
+df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
+
+# 하루 15분 단위 구간 인덱스 (0~95)
+
+df["q15_index"] = (df["hour"] * 60 + df["minute"]) // 15
+
+
+```
+
+## 주기성 인코딩 (일/주 주기)
+
+
+```{python}
+
+# 하루 주기 (96슬롯)
+
+df["sin_day"] = np.sin(2 * np.pi * df["q15_index"] / 96)
+df["cos_day"] = np.cos(2 * np.pi * df["q15_index"] / 96)
+
+# 주간 주기 (7일 × 96슬롯)
+
+df["sin_week"] = np.sin(2 * np.pi * (df["day_of_week"] * 96 + df["q15_index"]) / (7 * 96))
+df["cos_week"] = np.cos(2 * np.pi * (df["day_of_week"] * 96 + df["q15_index"]) / (7 * 96))
+
+```
+
+## 계절 구분
+
+
+```{python}
+
+def get_season(month):
+    if month in [12, 1, 2]:
+        return "winter"
+    elif month in [3, 4, 5]:
+        return "spring"
+    elif month in [6, 7, 8]:
+        return "summer"
+    else:
+        return "autumn"
+
+df["season"] = df["month"].apply(get_season)
+
+
+```
+
+## 🇰🇷 한국 공휴일 피처 추가
+
+
+```{python}
+
+# holidays 라이브러리로 한국 공휴일 객체 생성
+
+kr_holidays = holidays.KR()
+
+# 공휴일 여부 (1=공휴일, 0=평일)
+
+df["is_holiday"] = df["측정일시"].dt.date.apply(lambda x: int(x in kr_holidays))
+
+# 확인
+
+print("공휴일 예시:", list(kr_holidays.items())[:5])
+df[["측정일시", "day_of_week", "is_weekend", "is_holiday"]].head(10)
+
+
+```
+
+## 결과 확인
+
+
+```{python}
+
+cols = [
+"측정일시", "hour", "day_of_week", "is_weekend", "is_holiday",
+"q15_index", "sin_day", "cos_day", "sin_week", "cos_week", "season"
+]
+df[cols].head(20)
+
+
+```
+
+## 결과 저장
+
+```{python}
+
+output_path = "./data/train_time_features.csv"
+df.to_csv(output_path, index=False, encoding="utf-8-sig")
+
+```
+
+
+# 코드: 위치기반 날씨 데이터 + 시간 매칭 통합
+
+
+```{python}
+import pandas as pd
+import requests
+
+# ---------------------------------------
+# 1️⃣ 기본 설정
+# ---------------------------------------
+LAT, LON = 36.65070, 127.44550  # 청주시 흥덕구 백봉로 95
+PATH_TRAIN = "./data/train_time_features.csv"
+OUTPUT_PATH = "./data/fixed_train_weather_full.csv"
+
+# ---------------------------------------
+# 2️⃣ train 기간 확인
+# ---------------------------------------
+df = pd.read_csv(PATH_TRAIN)
+df["측정일시"] = pd.to_datetime(df["측정일시"])
+start_date = df["측정일시"].min().strftime("%Y-%m-%d")
+end_date = df["측정일시"].max().strftime("%Y-%m-%d")
+
+print(f"📆 기간: {start_date} ~ {end_date}")
+
+# ---------------------------------------
+# 3️⃣ Open-Meteo API 호출 준비
+# ---------------------------------------
+url = "https://archive-api.open-meteo.com/v1/archive"
+
+params = {
+    "latitude": LAT,
+    "longitude": LON,
+    "start_date": start_date,
+    "end_date": end_date,
+    "hourly": [
+        # 🌡️ 온도·습도 관련
+        "temperature_2m", "apparent_temperature", "dew_point_2m", "relative_humidity_2m",
+        # 🌧️ 강수·날씨
+        "precipitation", "rain", "snowfall", "weathercode",
+        # 🌬️ 풍속·풍향
+        "windspeed_10m", "winddirection_10m", "windgusts_10m",
+        # ☁️ 구름·일사·기압
+        "cloudcover", "shortwave_radiation", "surface_pressure", "sunshine_duration"
+    ],
+    "timezone": "Asia/Seoul"
+}
+
+# ---------------------------------------
+# 4️⃣ API 요청 및 변환
+# ---------------------------------------
+print("🌤️ Open-Meteo 데이터 요청 중...")
+response = requests.get(url, params=params)
+data = response.json()
+
+if "hourly" not in data:
+    raise ValueError("❌ API 응답에 hourly 데이터가 없습니다. 기간이나 위경도 확인 필요.")
+
+weather = pd.DataFrame(data["hourly"])
+weather["time"] = pd.to_datetime(weather["time"])
+
+# 컬럼명 한글화
+rename_dict = {
+    "time": "측정일시",
+    "temperature_2m": "기온(°C)",
+    "apparent_temperature": "체감온도(°C)",
+    "dew_point_2m": "이슬점(°C)",
+    "relative_humidity_2m": "습도(%)",
+    "precipitation": "총강수량(mm)",
+    "rain": "비(mm)",
+    "snowfall": "적설(cm)",
+    "weathercode": "날씨코드",
+    "windspeed_10m": "풍속(m/s)",
+    "winddirection_10m": "풍향(°)",
+    "windgusts_10m": "돌풍(m/s)",
+    "cloudcover": "구름량(%)",
+    "shortwave_radiation": "단파복사(W/m²)",
+    "surface_pressure": "기압(hPa)",
+    "sunshine_duration": "일조시간(s)"
+}
+weather.rename(columns=rename_dict, inplace=True)
+
+print("✅ 날씨 데이터 수집 완료:", weather.shape)
+
+# ---------------------------------------
+# 5️⃣ 시간 매칭 (1시간 → 15분 단위 병합)
+# ---------------------------------------
+df["측정일시_정시"] = df["측정일시"].dt.floor("H")
+
+merged = pd.merge_asof(
+    df.sort_values("측정일시_정시"),
+    weather.sort_values("측정일시"),
+    left_on="측정일시_정시",
+    right_on="측정일시",
+    direction="nearest"
+)
+
+merged.drop(columns=["측정일시_정시"], inplace=True)
+
+# ---------------------------------------
+# 6️⃣ 저장
+# ---------------------------------------
+merged.to_csv(OUTPUT_PATH, index=False, encoding="utf-8-sig")
+print(f"✅ 최종 파일 저장 완료: {OUTPUT_PATH}")
+print("📊 최종 데이터 크기:", merged.shape)
+
+# 미리보기
+print(merged.head(5))
+
+
+```
+
+# train 과 test 컬럼 차이
+
+```{python}
+import pandas as pd
+
+# ---------------------------------------
+# 1️⃣ 파일 불러오기
+# ---------------------------------------
+path = "./data/fixed_train_weather_full.csv"
+df = pd.read_csv(path)
+print("📂 원본 데이터 크기:", df.shape)
+
+# ---------------------------------------
+# 2️⃣ 제거 대상 컬럼 정의
+# ---------------------------------------
+remove_cols = [
+    "carbon_per_kWh",    # 탄소배출량 파생
+    "kVAh",              # 전력사용량 기반 계산
+    "kW_15m",            # 단순 배수 변환
+    "pf_avg",            # 평균 역률 (지상/진상에서 파생)
+    "pf_low_flag",       # 역률 플래그 (파생)
+    "탄소배출량(tCO2)"   # carbon_per_kWh와 중복
+]
+
+# ---------------------------------------
+# 3️⃣ 실제로 존재하는 컬럼만 필터링 후 제거
+# ---------------------------------------
+cols_to_drop = [c for c in remove_cols if c in df.columns]
+df = df.drop(columns=cols_to_drop, errors="ignore")
+
+print(f"🧹 제거된 컬럼: {cols_to_drop}")
+print("📊 정리 후 데이터 크기:", df.shape)
+
+# ---------------------------------------
+# 4️⃣ 중복 컬럼 이름 자동 제거 (merge 시 생긴 중복 등)
+# ---------------------------------------
+df = df.loc[:, ~df.columns.duplicated()]
+
+# ---------------------------------------
+# 5️⃣ 저장
+# ---------------------------------------
+output_path = "./data/fixed_train_clean.csv"
+df.to_csv(output_path, index=False, encoding="utf-8-sig")
+
+print(f"✅ 최종 정리 완료: {output_path}")
+
+```
+
+```{python}
+
+
+import pandas as pd
+
+# 파일 경로 지정
+train_path = "./data/fixed_train_clean.csv"
+test_path = "./data/fixed_test_weather_full.csv"
+
+# 파일 읽기
+train = pd.read_csv(train_path)
+test = pd.read_csv(test_path)
+
+# 컬럼 리스트 추출
+train_cols = set(train.columns)
+test_cols = set(test.columns)
+
+# 차이 비교
+only_in_train = train_cols - test_cols
+only_in_test = test_cols - train_cols
+common_cols = train_cols & test_cols
+
+print("✅ 공통 컬럼 개수:", len(common_cols))
+print("✅ 공통 컬럼:", sorted(list(common_cols)))
+print("\n❌ train에만 있는 컬럼:", sorted(list(only_in_train)))
+print("\n❌ test에만 있는 컬럼:", sorted(list(only_in_test)))
+
+
+```

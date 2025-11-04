@@ -1,0 +1,62 @@
+{
+  "전력사용량(kWh)": {
+    "best_mae": 13.973431541970974,
+    "best_params": {
+      "n_layers": 2,
+      "units": 64,
+      "dropout": 0.30000000000000004,
+      "seq_len": 48,
+      "lr": 0.0009344996792772221,
+      "batch_size": 32,
+      "epochs": 30
+    }
+  },
+  "지상무효전력량(kVarh)": {
+    "best_mae": 8.089594342312893,
+    "best_params": {
+      "n_layers": 2,
+      "units": 32,
+      "dropout": 0.2,
+      "seq_len": 36,
+      "lr": 0.0007525436097472862,
+      "batch_size": 32,
+      "epochs": 30
+    }
+  },
+  "진상무효전력량(kVarh)": {
+    "best_mae": 3.1994084043674538,
+    "best_params": {
+      "n_layers": 1,
+      "units": 16,
+      "dropout": 0.30000000000000004,
+      "seq_len": 36,
+      "lr": 0.0026265798990159615,
+      "batch_size": 16,
+      "epochs": 40
+    }
+  },
+  "지상역률(%)": {
+    "best_mae": 5.704329132437009,
+    "best_params": {
+      "n_layers": 2,
+      "units": 32,
+      "dropout": 0.1,
+      "seq_len": 36,
+      "lr": 0.002547698797570022,
+      "batch_size": 16,
+      "epochs": 20
+    }
+  },
+  "진상역률(%)": {
+    "best_mae": 13.36654680957546,
+    "best_params": {
+      "n_layers": 1,
+      "units": 32,
+      "dropout": 0.4,
+      "seq_len": 24,
+      "lr": 0.0023554660046714642,
+      "batch_size": 16,
+      "epochs": 40
+    }
+  }
+}

@@ -1,0 +1,1338 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.7.32">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+<meta name="author" content="김동균">
+<meta name="dcterms.date" content="2025-10-24">
+
+<title>LS 전력 사용량 기반 전기요금 예측 - 데이터 탐색</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.5.1/jquery.min.js" integrity="sha512-bLT0Qm9VnAYZDflyKcBaQ2gg0hSYNQrJ8RilYldYQ1FxQYoCLtUjuuRuZo+fjqhx/qtq/1itJ0C2ejDxltZVFg==" crossorigin="anonymous"></script><script src="파생변수_files/libs/clipboard/clipboard.min.js"></script>
+<script src="파생변수_files/libs/quarto-html/quarto.js" type="module"></script>
+<script src="파생변수_files/libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="파생변수_files/libs/quarto-html/popper.min.js"></script>
+<script src="파생변수_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="파생변수_files/libs/quarto-html/anchor.min.js"></script>
+<link href="파생변수_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="파생변수_files/libs/quarto-html/quarto-syntax-highlighting-37eea08aefeeee20ff55810ff984fec1.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="파생변수_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="파생변수_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="파생변수_files/libs/bootstrap/bootstrap-813c323200a87c37e262811031999de4.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" integrity="sha512-c3Nl8+7g4LMSTdrm621y7kf9v3SDPnhxLNhcjFJbKECVnmZHTdo+IRO05sNLTH/D3vA6u1X32ehoLC7WFVdheg==" crossorigin="anonymous"></script>
+
+<script type="application/javascript">define('jquery', [],function() {return window.jQuery;})</script>
+
+
+</head>
+
+<body class="quarto-light">
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+<div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+  <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">Table of contents</h2>
+   
+  <ul>
+  <li><a href="#프로젝트-개요" id="toc-프로젝트-개요" class="nav-link active" data-scroll-target="#프로젝트-개요">프로젝트 개요</a></li>
+  <li><a href="#라이브러리-불러오기" id="toc-라이브러리-불러오기" class="nav-link" data-scroll-target="#라이브러리-불러오기">라이브러리 불러오기</a></li>
+  <li><a href="#시간-외생-변수" id="toc-시간-외생-변수" class="nav-link" data-scroll-target="#시간-외생-변수">시간 외생 변수</a>
+  <ul class="collapse">
+  <li><a href="#주기성-인코딩-일주-주기" id="toc-주기성-인코딩-일주-주기" class="nav-link" data-scroll-target="#주기성-인코딩-일주-주기">주기성 인코딩 (일/주 주기)</a></li>
+  <li><a href="#주기성-인코딩-일주-주기-1" id="toc-주기성-인코딩-일주-주기-1" class="nav-link" data-scroll-target="#주기성-인코딩-일주-주기-1">주기성 인코딩 (일/주 주기)</a></li>
+  <li><a href="#계절-구분" id="toc-계절-구분" class="nav-link" data-scroll-target="#계절-구분">계절 구분</a></li>
+  <li><a href="#한국-공휴일-피처-추가" id="toc-한국-공휴일-피처-추가" class="nav-link" data-scroll-target="#한국-공휴일-피처-추가">🇰🇷 한국 공휴일 피처 추가</a></li>
+  <li><a href="#결과-확인" id="toc-결과-확인" class="nav-link" data-scroll-target="#결과-확인">결과 확인</a></li>
+  <li><a href="#결과-저장" id="toc-결과-저장" class="nav-link" data-scroll-target="#결과-저장">결과 저장</a></li>
+  </ul></li>
+  <li><a href="#코드-위치기반-날씨-데이터-시간-매칭-통합" id="toc-코드-위치기반-날씨-데이터-시간-매칭-통합" class="nav-link" data-scroll-target="#코드-위치기반-날씨-데이터-시간-매칭-통합">코드: 위치기반 날씨 데이터 + 시간 매칭 통합</a></li>
+  <li><a href="#train-과-test-컬럼-차이" id="toc-train-과-test-컬럼-차이" class="nav-link" data-scroll-target="#train-과-test-컬럼-차이">train 과 test 컬럼 차이</a></li>
+  </ul>
+</nav>
+</div>
+<main class="content" id="quarto-document-content">
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<h1 class="title">LS 전력 사용량 기반 전기요금 예측 - 데이터 탐색</h1>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    <div>
+    <div class="quarto-title-meta-heading">Author</div>
+    <div class="quarto-title-meta-contents">
+             <p>김동균 </p>
+          </div>
+  </div>
+    
+    <div>
+    <div class="quarto-title-meta-heading">Published</div>
+    <div class="quarto-title-meta-contents">
+      <p class="date">October 24, 2025</p>
+    </div>
+  </div>
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<section id="프로젝트-개요" class="level1">
+<h1>프로젝트 개요</h1>
+<p>이 문서는 <strong>LS 전력 사용량 기반 전기요금 예측 대회</strong>의 첫 번째 단계로,<br>
+기본 데이터셋 구조 및 결측치, 이상치, 통계적 특징 등을 확인하기 위한 데이터 탐색(EDA) 목적을 가진다.</p>
+<hr>
+</section>
+<section id="라이브러리-불러오기" class="level1">
+<h1>라이브러리 불러오기</h1>
+<div id="30bd08eb" class="cell" data-execution_count="1">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> numpy <span class="im">as</span> np</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> holidays</span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="co"># 데이터 로드</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>train <span class="op">=</span> pd.read_csv(<span class="st">"./data/train.csv"</span>)</span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="co"># 데이터 크기 확인</span></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"데이터 크기:"</span>, train.shape)</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(train.head())</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>데이터 크기: (32064, 10)
+   id                 측정일시  전력사용량(kWh)  지상무효전력량(kVarh)  진상무효전력량(kVarh)  \
+0   0  2024-01-01 00:15:00        3.17            2.95             0.0   
+1   1  2024-01-01 00:30:00        4.00            4.46             0.0   
+2   2  2024-01-01 00:45:00        3.24            3.28             0.0   
+3   3  2024-01-01 01:00:00        3.31            3.56             0.0   
+4   4  2024-01-01 01:15:00        3.82            4.50             0.0   
+
+   탄소배출량(tCO2)  지상역률(%)  진상역률(%)        작업유형     전기요금(원)  
+0          0.0    73.21    100.0  Light_Load  515.468903  
+1          0.0    66.77    100.0  Light_Load  713.151879  
+2          0.0    70.28    100.0  Light_Load  548.815530  
+3          0.0    68.09    100.0  Light_Load  578.648359  
+4          0.0    64.72    100.0  Light_Load  702.650974  </code></pre>
+</div>
+</div>
+</section>
+<section id="시간-외생-변수" class="level1">
+<h1>시간 외생 변수</h1>
+<section id="주기성-인코딩-일주-주기" class="level2">
+<h2 class="anchored" data-anchor-id="주기성-인코딩-일주-주기">주기성 인코딩 (일/주 주기)</h2>
+<div id="c9db8f52" class="cell" data-execution_count="2">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> pd.read_csv(<span class="st">"./data/test.csv"</span>)</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="co"># 날짜형으로 변환</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"측정일시"</span>] <span class="op">=</span> pd.to_datetime(df[<span class="st">"측정일시"</span>])</span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> df.sort_values(<span class="st">"측정일시"</span>).reset_index(drop<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"✅ 데이터 크기:"</span>, df.shape)</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>df.head(<span class="dv">3</span>)</span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a><span class="co">#날짜형으로 변환</span></span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"측정일시"</span>] <span class="op">=</span> pd.to_datetime(df[<span class="st">"측정일시"</span>])</span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> df.sort_values(<span class="st">"측정일시"</span>).reset_index(drop<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"year"</span>] <span class="op">=</span> df[<span class="st">"측정일시"</span>].dt.year</span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"month"</span>] <span class="op">=</span> df[<span class="st">"측정일시"</span>].dt.month</span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"day"</span>] <span class="op">=</span> df[<span class="st">"측정일시"</span>].dt.day</span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"hour"</span>] <span class="op">=</span> df[<span class="st">"측정일시"</span>].dt.hour</span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"minute"</span>] <span class="op">=</span> df[<span class="st">"측정일시"</span>].dt.minute</span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a><span class="co"># 요일, 주말 여부</span></span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"day_of_week"</span>] <span class="op">=</span> df[<span class="st">"측정일시"</span>].dt.dayofweek  <span class="co"># 0=월, 6=일</span></span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"is_weekend"</span>] <span class="op">=</span> (df[<span class="st">"day_of_week"</span>] <span class="op">&gt;=</span> <span class="dv">5</span>).astype(<span class="bu">int</span>)</span>
+<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a><span class="co"># 하루 15분 단위 구간 인덱스 (0~95)</span></span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"q15_index"</span>] <span class="op">=</span> (df[<span class="st">"hour"</span>] <span class="op">*</span> <span class="dv">60</span> <span class="op">+</span> df[<span class="st">"minute"</span>]) <span class="op">//</span> <span class="dv">15</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>✅ 데이터 크기: (2976, 3)</code></pre>
+</div>
+</div>
+</section>
+<section id="주기성-인코딩-일주-주기-1" class="level2">
+<h2 class="anchored" data-anchor-id="주기성-인코딩-일주-주기-1">주기성 인코딩 (일/주 주기)</h2>
+<div id="5b07ea22" class="cell" data-execution_count="3">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb5"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 하루 주기 (96슬롯)</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"sin_day"</span>] <span class="op">=</span> np.sin(<span class="dv">2</span> <span class="op">*</span> np.pi <span class="op">*</span> df[<span class="st">"q15_index"</span>] <span class="op">/</span> <span class="dv">96</span>)</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"cos_day"</span>] <span class="op">=</span> np.cos(<span class="dv">2</span> <span class="op">*</span> np.pi <span class="op">*</span> df[<span class="st">"q15_index"</span>] <span class="op">/</span> <span class="dv">96</span>)</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a><span class="co"># 주간 주기 (7일 × 96슬롯)</span></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"sin_week"</span>] <span class="op">=</span> np.sin(<span class="dv">2</span> <span class="op">*</span> np.pi <span class="op">*</span> (df[<span class="st">"day_of_week"</span>] <span class="op">*</span> <span class="dv">96</span> <span class="op">+</span> df[<span class="st">"q15_index"</span>]) <span class="op">/</span> (<span class="dv">7</span> <span class="op">*</span> <span class="dv">96</span>))</span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"cos_week"</span>] <span class="op">=</span> np.cos(<span class="dv">2</span> <span class="op">*</span> np.pi <span class="op">*</span> (df[<span class="st">"day_of_week"</span>] <span class="op">*</span> <span class="dv">96</span> <span class="op">+</span> df[<span class="st">"q15_index"</span>]) <span class="op">/</span> (<span class="dv">7</span> <span class="op">*</span> <span class="dv">96</span>))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+</div>
+</section>
+<section id="계절-구분" class="level2">
+<h2 class="anchored" data-anchor-id="계절-구분">계절 구분</h2>
+<div id="461c7e50" class="cell" data-execution_count="4">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb6"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> get_season(month):</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> month <span class="kw">in</span> [<span class="dv">12</span>, <span class="dv">1</span>, <span class="dv">2</span>]:</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="st">"winter"</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">elif</span> month <span class="kw">in</span> [<span class="dv">3</span>, <span class="dv">4</span>, <span class="dv">5</span>]:</span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="st">"spring"</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>    <span class="cf">elif</span> month <span class="kw">in</span> [<span class="dv">6</span>, <span class="dv">7</span>, <span class="dv">8</span>]:</span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="st">"summer"</span></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">else</span>:</span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="st">"autumn"</span></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"season"</span>] <span class="op">=</span> df[<span class="st">"month"</span>].<span class="bu">apply</span>(get_season)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+</div>
+</section>
+<section id="한국-공휴일-피처-추가" class="level2">
+<h2 class="anchored" data-anchor-id="한국-공휴일-피처-추가">🇰🇷 한국 공휴일 피처 추가</h2>
+<div id="085cc936" class="cell" data-execution_count="5">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb7"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="co"># holidays 라이브러리로 한국 공휴일 객체 생성</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>kr_holidays <span class="op">=</span> holidays.KR()</span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a><span class="co"># 공휴일 여부 (1=공휴일, 0=평일)</span></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"is_holiday"</span>] <span class="op">=</span> df[<span class="st">"측정일시"</span>].dt.date.<span class="bu">apply</span>(<span class="kw">lambda</span> x: <span class="bu">int</span>(x <span class="kw">in</span> kr_holidays))</span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a><span class="co"># 확인</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"공휴일 예시:"</span>, <span class="bu">list</span>(kr_holidays.items())[:<span class="dv">5</span>])</span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>df[[<span class="st">"측정일시"</span>, <span class="st">"day_of_week"</span>, <span class="st">"is_weekend"</span>, <span class="st">"is_holiday"</span>]].head(<span class="dv">10</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>공휴일 예시: [(datetime.date(2024, 1, 1), "New Year's Day"), (datetime.date(2024, 2, 10), 'Korean New Year'), (datetime.date(2024, 2, 9), 'The day preceding Korean New Year'), (datetime.date(2024, 2, 11), 'The second day of Korean New Year'), (datetime.date(2024, 3, 1), 'Independence Movement Day')]</code></pre>
+</div>
+<div class="cell-output cell-output-display" data-execution_count="5">
+<div>
+
+
+<table class="dataframe caption-top table table-sm table-striped small" data-quarto-postprocess="true" data-border="1">
+<thead>
+<tr class="header">
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th">측정일시</th>
+<th data-quarto-table-cell-role="th">day_of_week</th>
+<th data-quarto-table-cell-role="th">is_weekend</th>
+<th data-quarto-table-cell-role="th">is_holiday</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">0</td>
+<td>2024-12-01 00:00:00</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">1</td>
+<td>2024-12-01 00:15:00</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">2</td>
+<td>2024-12-01 00:30:00</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">3</td>
+<td>2024-12-01 00:45:00</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">4</td>
+<td>2024-12-01 01:00:00</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">5</td>
+<td>2024-12-01 01:15:00</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">6</td>
+<td>2024-12-01 01:30:00</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">7</td>
+<td>2024-12-01 01:45:00</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">8</td>
+<td>2024-12-01 02:00:00</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">9</td>
+<td>2024-12-01 02:15:00</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+</tr>
+</tbody>
+</table>
+
+</div>
+</div>
+</div>
+</section>
+<section id="결과-확인" class="level2">
+<h2 class="anchored" data-anchor-id="결과-확인">결과 확인</h2>
+<div id="8ecf4065" class="cell" data-execution_count="6">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb9"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>cols <span class="op">=</span> [</span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a><span class="st">"측정일시"</span>, <span class="st">"hour"</span>, <span class="st">"day_of_week"</span>, <span class="st">"is_weekend"</span>, <span class="st">"is_holiday"</span>,</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a><span class="st">"q15_index"</span>, <span class="st">"sin_day"</span>, <span class="st">"cos_day"</span>, <span class="st">"sin_week"</span>, <span class="st">"cos_week"</span>, <span class="st">"season"</span></span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>]</span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>df[cols].head(<span class="dv">20</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-display" data-execution_count="6">
+<div>
+
+
+<table class="dataframe caption-top table table-sm table-striped small" data-quarto-postprocess="true" data-border="1">
+<thead>
+<tr class="header">
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th">측정일시</th>
+<th data-quarto-table-cell-role="th">hour</th>
+<th data-quarto-table-cell-role="th">day_of_week</th>
+<th data-quarto-table-cell-role="th">is_weekend</th>
+<th data-quarto-table-cell-role="th">is_holiday</th>
+<th data-quarto-table-cell-role="th">q15_index</th>
+<th data-quarto-table-cell-role="th">sin_day</th>
+<th data-quarto-table-cell-role="th">cos_day</th>
+<th data-quarto-table-cell-role="th">sin_week</th>
+<th data-quarto-table-cell-role="th">cos_week</th>
+<th data-quarto-table-cell-role="th">season</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">0</td>
+<td>2024-12-01 00:00:00</td>
+<td>0</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.000000</td>
+<td>1.000000</td>
+<td>-0.781831</td>
+<td>0.623490</td>
+<td>winter</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">1</td>
+<td>2024-12-01 00:15:00</td>
+<td>0</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>1</td>
+<td>0.065403</td>
+<td>0.997859</td>
+<td>-0.775968</td>
+<td>0.630773</td>
+<td>winter</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">2</td>
+<td>2024-12-01 00:30:00</td>
+<td>0</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>2</td>
+<td>0.130526</td>
+<td>0.991445</td>
+<td>-0.770036</td>
+<td>0.638000</td>
+<td>winter</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">3</td>
+<td>2024-12-01 00:45:00</td>
+<td>0</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>3</td>
+<td>0.195090</td>
+<td>0.980785</td>
+<td>-0.764037</td>
+<td>0.645172</td>
+<td>winter</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">4</td>
+<td>2024-12-01 01:00:00</td>
+<td>1</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>4</td>
+<td>0.258819</td>
+<td>0.965926</td>
+<td>-0.757972</td>
+<td>0.652287</td>
+<td>winter</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">5</td>
+<td>2024-12-01 01:15:00</td>
+<td>1</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>5</td>
+<td>0.321439</td>
+<td>0.946930</td>
+<td>-0.751840</td>
+<td>0.659346</td>
+<td>winter</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">6</td>
+<td>2024-12-01 01:30:00</td>
+<td>1</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>6</td>
+<td>0.382683</td>
+<td>0.923880</td>
+<td>-0.745642</td>
+<td>0.666347</td>
+<td>winter</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">7</td>
+<td>2024-12-01 01:45:00</td>
+<td>1</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>7</td>
+<td>0.442289</td>
+<td>0.896873</td>
+<td>-0.739379</td>
+<td>0.673289</td>
+<td>winter</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">8</td>
+<td>2024-12-01 02:00:00</td>
+<td>2</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>8</td>
+<td>0.500000</td>
+<td>0.866025</td>
+<td>-0.733052</td>
+<td>0.680173</td>
+<td>winter</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">9</td>
+<td>2024-12-01 02:15:00</td>
+<td>2</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>9</td>
+<td>0.555570</td>
+<td>0.831470</td>
+<td>-0.726660</td>
+<td>0.686997</td>
+<td>winter</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">10</td>
+<td>2024-12-01 02:30:00</td>
+<td>2</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>10</td>
+<td>0.608761</td>
+<td>0.793353</td>
+<td>-0.720205</td>
+<td>0.693761</td>
+<td>winter</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">11</td>
+<td>2024-12-01 02:45:00</td>
+<td>2</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>11</td>
+<td>0.659346</td>
+<td>0.751840</td>
+<td>-0.713687</td>
+<td>0.700465</td>
+<td>winter</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">12</td>
+<td>2024-12-01 03:00:00</td>
+<td>3</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>12</td>
+<td>0.707107</td>
+<td>0.707107</td>
+<td>-0.707107</td>
+<td>0.707107</td>
+<td>winter</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">13</td>
+<td>2024-12-01 03:15:00</td>
+<td>3</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>13</td>
+<td>0.751840</td>
+<td>0.659346</td>
+<td>-0.700465</td>
+<td>0.713687</td>
+<td>winter</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">14</td>
+<td>2024-12-01 03:30:00</td>
+<td>3</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>14</td>
+<td>0.793353</td>
+<td>0.608761</td>
+<td>-0.693761</td>
+<td>0.720205</td>
+<td>winter</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">15</td>
+<td>2024-12-01 03:45:00</td>
+<td>3</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>15</td>
+<td>0.831470</td>
+<td>0.555570</td>
+<td>-0.686997</td>
+<td>0.726660</td>
+<td>winter</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">16</td>
+<td>2024-12-01 04:00:00</td>
+<td>4</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>16</td>
+<td>0.866025</td>
+<td>0.500000</td>
+<td>-0.680173</td>
+<td>0.733052</td>
+<td>winter</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">17</td>
+<td>2024-12-01 04:15:00</td>
+<td>4</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>17</td>
+<td>0.896873</td>
+<td>0.442289</td>
+<td>-0.673289</td>
+<td>0.739379</td>
+<td>winter</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">18</td>
+<td>2024-12-01 04:30:00</td>
+<td>4</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>18</td>
+<td>0.923880</td>
+<td>0.382683</td>
+<td>-0.666347</td>
+<td>0.745642</td>
+<td>winter</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">19</td>
+<td>2024-12-01 04:45:00</td>
+<td>4</td>
+<td>6</td>
+<td>1</td>
+<td>0</td>
+<td>19</td>
+<td>0.946930</td>
+<td>0.321439</td>
+<td>-0.659346</td>
+<td>0.751840</td>
+<td>winter</td>
+</tr>
+</tbody>
+</table>
+
+</div>
+</div>
+</div>
+</section>
+<section id="결과-저장" class="level2">
+<h2 class="anchored" data-anchor-id="결과-저장">결과 저장</h2>
+<div id="8aaa7c7b" class="cell" data-execution_count="7">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb10"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>output_path <span class="op">=</span> <span class="st">"./data/train_time_features.csv"</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>df.to_csv(output_path, index<span class="op">=</span><span class="va">False</span>, encoding<span class="op">=</span><span class="st">"utf-8-sig"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+</div>
+</section>
+</section>
+<section id="코드-위치기반-날씨-데이터-시간-매칭-통합" class="level1">
+<h1>코드: 위치기반 날씨 데이터 + 시간 매칭 통합</h1>
+<div id="b5ddaada" class="cell" data-execution_count="8">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb11"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> requests</span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a><span class="co"># 1️⃣ 기본 설정</span></span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a>LAT, LON <span class="op">=</span> <span class="fl">36.65070</span>, <span class="fl">127.44550</span>  <span class="co"># 청주시 흥덕구 백봉로 95</span></span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a>PATH_TRAIN <span class="op">=</span> <span class="st">"./data/train_time_features.csv"</span></span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a>OUTPUT_PATH <span class="op">=</span> <span class="st">"./data/fixed_train_weather_full.csv"</span></span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb11-12"><a href="#cb11-12" aria-hidden="true" tabindex="-1"></a><span class="co"># 2️⃣ train 기간 확인</span></span>
+<span id="cb11-13"><a href="#cb11-13" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb11-14"><a href="#cb11-14" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> pd.read_csv(PATH_TRAIN)</span>
+<span id="cb11-15"><a href="#cb11-15" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"측정일시"</span>] <span class="op">=</span> pd.to_datetime(df[<span class="st">"측정일시"</span>])</span>
+<span id="cb11-16"><a href="#cb11-16" aria-hidden="true" tabindex="-1"></a>start_date <span class="op">=</span> df[<span class="st">"측정일시"</span>].<span class="bu">min</span>().strftime(<span class="st">"%Y-%m-</span><span class="sc">%d</span><span class="st">"</span>)</span>
+<span id="cb11-17"><a href="#cb11-17" aria-hidden="true" tabindex="-1"></a>end_date <span class="op">=</span> df[<span class="st">"측정일시"</span>].<span class="bu">max</span>().strftime(<span class="st">"%Y-%m-</span><span class="sc">%d</span><span class="st">"</span>)</span>
+<span id="cb11-18"><a href="#cb11-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-19"><a href="#cb11-19" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"📆 기간: </span><span class="sc">{</span>start_date<span class="sc">}</span><span class="ss"> ~ </span><span class="sc">{</span>end_date<span class="sc">}</span><span class="ss">"</span>)</span>
+<span id="cb11-20"><a href="#cb11-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-21"><a href="#cb11-21" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb11-22"><a href="#cb11-22" aria-hidden="true" tabindex="-1"></a><span class="co"># 3️⃣ Open-Meteo API 호출 준비</span></span>
+<span id="cb11-23"><a href="#cb11-23" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb11-24"><a href="#cb11-24" aria-hidden="true" tabindex="-1"></a>url <span class="op">=</span> <span class="st">"https://archive-api.open-meteo.com/v1/archive"</span></span>
+<span id="cb11-25"><a href="#cb11-25" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-26"><a href="#cb11-26" aria-hidden="true" tabindex="-1"></a>params <span class="op">=</span> {</span>
+<span id="cb11-27"><a href="#cb11-27" aria-hidden="true" tabindex="-1"></a>    <span class="st">"latitude"</span>: LAT,</span>
+<span id="cb11-28"><a href="#cb11-28" aria-hidden="true" tabindex="-1"></a>    <span class="st">"longitude"</span>: LON,</span>
+<span id="cb11-29"><a href="#cb11-29" aria-hidden="true" tabindex="-1"></a>    <span class="st">"start_date"</span>: start_date,</span>
+<span id="cb11-30"><a href="#cb11-30" aria-hidden="true" tabindex="-1"></a>    <span class="st">"end_date"</span>: end_date,</span>
+<span id="cb11-31"><a href="#cb11-31" aria-hidden="true" tabindex="-1"></a>    <span class="st">"hourly"</span>: [</span>
+<span id="cb11-32"><a href="#cb11-32" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 🌡️ 온도·습도 관련</span></span>
+<span id="cb11-33"><a href="#cb11-33" aria-hidden="true" tabindex="-1"></a>        <span class="st">"temperature_2m"</span>, <span class="st">"apparent_temperature"</span>, <span class="st">"dew_point_2m"</span>, <span class="st">"relative_humidity_2m"</span>,</span>
+<span id="cb11-34"><a href="#cb11-34" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 🌧️ 강수·날씨</span></span>
+<span id="cb11-35"><a href="#cb11-35" aria-hidden="true" tabindex="-1"></a>        <span class="st">"precipitation"</span>, <span class="st">"rain"</span>, <span class="st">"snowfall"</span>, <span class="st">"weathercode"</span>,</span>
+<span id="cb11-36"><a href="#cb11-36" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 🌬️ 풍속·풍향</span></span>
+<span id="cb11-37"><a href="#cb11-37" aria-hidden="true" tabindex="-1"></a>        <span class="st">"windspeed_10m"</span>, <span class="st">"winddirection_10m"</span>, <span class="st">"windgusts_10m"</span>,</span>
+<span id="cb11-38"><a href="#cb11-38" aria-hidden="true" tabindex="-1"></a>        <span class="co"># ☁️ 구름·일사·기압</span></span>
+<span id="cb11-39"><a href="#cb11-39" aria-hidden="true" tabindex="-1"></a>        <span class="st">"cloudcover"</span>, <span class="st">"shortwave_radiation"</span>, <span class="st">"surface_pressure"</span>, <span class="st">"sunshine_duration"</span></span>
+<span id="cb11-40"><a href="#cb11-40" aria-hidden="true" tabindex="-1"></a>    ],</span>
+<span id="cb11-41"><a href="#cb11-41" aria-hidden="true" tabindex="-1"></a>    <span class="st">"timezone"</span>: <span class="st">"Asia/Seoul"</span></span>
+<span id="cb11-42"><a href="#cb11-42" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb11-43"><a href="#cb11-43" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-44"><a href="#cb11-44" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb11-45"><a href="#cb11-45" aria-hidden="true" tabindex="-1"></a><span class="co"># 4️⃣ API 요청 및 변환</span></span>
+<span id="cb11-46"><a href="#cb11-46" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb11-47"><a href="#cb11-47" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"🌤️ Open-Meteo 데이터 요청 중..."</span>)</span>
+<span id="cb11-48"><a href="#cb11-48" aria-hidden="true" tabindex="-1"></a>response <span class="op">=</span> requests.get(url, params<span class="op">=</span>params)</span>
+<span id="cb11-49"><a href="#cb11-49" aria-hidden="true" tabindex="-1"></a>data <span class="op">=</span> response.json()</span>
+<span id="cb11-50"><a href="#cb11-50" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-51"><a href="#cb11-51" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="st">"hourly"</span> <span class="kw">not</span> <span class="kw">in</span> data:</span>
+<span id="cb11-52"><a href="#cb11-52" aria-hidden="true" tabindex="-1"></a>    <span class="cf">raise</span> <span class="pp">ValueError</span>(<span class="st">"❌ API 응답에 hourly 데이터가 없습니다. 기간이나 위경도 확인 필요."</span>)</span>
+<span id="cb11-53"><a href="#cb11-53" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-54"><a href="#cb11-54" aria-hidden="true" tabindex="-1"></a>weather <span class="op">=</span> pd.DataFrame(data[<span class="st">"hourly"</span>])</span>
+<span id="cb11-55"><a href="#cb11-55" aria-hidden="true" tabindex="-1"></a>weather[<span class="st">"time"</span>] <span class="op">=</span> pd.to_datetime(weather[<span class="st">"time"</span>])</span>
+<span id="cb11-56"><a href="#cb11-56" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-57"><a href="#cb11-57" aria-hidden="true" tabindex="-1"></a><span class="co"># 컬럼명 한글화</span></span>
+<span id="cb11-58"><a href="#cb11-58" aria-hidden="true" tabindex="-1"></a>rename_dict <span class="op">=</span> {</span>
+<span id="cb11-59"><a href="#cb11-59" aria-hidden="true" tabindex="-1"></a>    <span class="st">"time"</span>: <span class="st">"측정일시"</span>,</span>
+<span id="cb11-60"><a href="#cb11-60" aria-hidden="true" tabindex="-1"></a>    <span class="st">"temperature_2m"</span>: <span class="st">"기온(°C)"</span>,</span>
+<span id="cb11-61"><a href="#cb11-61" aria-hidden="true" tabindex="-1"></a>    <span class="st">"apparent_temperature"</span>: <span class="st">"체감온도(°C)"</span>,</span>
+<span id="cb11-62"><a href="#cb11-62" aria-hidden="true" tabindex="-1"></a>    <span class="st">"dew_point_2m"</span>: <span class="st">"이슬점(°C)"</span>,</span>
+<span id="cb11-63"><a href="#cb11-63" aria-hidden="true" tabindex="-1"></a>    <span class="st">"relative_humidity_2m"</span>: <span class="st">"습도(%)"</span>,</span>
+<span id="cb11-64"><a href="#cb11-64" aria-hidden="true" tabindex="-1"></a>    <span class="st">"precipitation"</span>: <span class="st">"총강수량(mm)"</span>,</span>
+<span id="cb11-65"><a href="#cb11-65" aria-hidden="true" tabindex="-1"></a>    <span class="st">"rain"</span>: <span class="st">"비(mm)"</span>,</span>
+<span id="cb11-66"><a href="#cb11-66" aria-hidden="true" tabindex="-1"></a>    <span class="st">"snowfall"</span>: <span class="st">"적설(cm)"</span>,</span>
+<span id="cb11-67"><a href="#cb11-67" aria-hidden="true" tabindex="-1"></a>    <span class="st">"weathercode"</span>: <span class="st">"날씨코드"</span>,</span>
+<span id="cb11-68"><a href="#cb11-68" aria-hidden="true" tabindex="-1"></a>    <span class="st">"windspeed_10m"</span>: <span class="st">"풍속(m/s)"</span>,</span>
+<span id="cb11-69"><a href="#cb11-69" aria-hidden="true" tabindex="-1"></a>    <span class="st">"winddirection_10m"</span>: <span class="st">"풍향(°)"</span>,</span>
+<span id="cb11-70"><a href="#cb11-70" aria-hidden="true" tabindex="-1"></a>    <span class="st">"windgusts_10m"</span>: <span class="st">"돌풍(m/s)"</span>,</span>
+<span id="cb11-71"><a href="#cb11-71" aria-hidden="true" tabindex="-1"></a>    <span class="st">"cloudcover"</span>: <span class="st">"구름량(%)"</span>,</span>
+<span id="cb11-72"><a href="#cb11-72" aria-hidden="true" tabindex="-1"></a>    <span class="st">"shortwave_radiation"</span>: <span class="st">"단파복사(W/m²)"</span>,</span>
+<span id="cb11-73"><a href="#cb11-73" aria-hidden="true" tabindex="-1"></a>    <span class="st">"surface_pressure"</span>: <span class="st">"기압(hPa)"</span>,</span>
+<span id="cb11-74"><a href="#cb11-74" aria-hidden="true" tabindex="-1"></a>    <span class="st">"sunshine_duration"</span>: <span class="st">"일조시간(s)"</span></span>
+<span id="cb11-75"><a href="#cb11-75" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb11-76"><a href="#cb11-76" aria-hidden="true" tabindex="-1"></a>weather.rename(columns<span class="op">=</span>rename_dict, inplace<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb11-77"><a href="#cb11-77" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-78"><a href="#cb11-78" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"✅ 날씨 데이터 수집 완료:"</span>, weather.shape)</span>
+<span id="cb11-79"><a href="#cb11-79" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-80"><a href="#cb11-80" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb11-81"><a href="#cb11-81" aria-hidden="true" tabindex="-1"></a><span class="co"># 5️⃣ 시간 매칭 (1시간 → 15분 단위 병합)</span></span>
+<span id="cb11-82"><a href="#cb11-82" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb11-83"><a href="#cb11-83" aria-hidden="true" tabindex="-1"></a>df[<span class="st">"측정일시_정시"</span>] <span class="op">=</span> df[<span class="st">"측정일시"</span>].dt.floor(<span class="st">"H"</span>)</span>
+<span id="cb11-84"><a href="#cb11-84" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-85"><a href="#cb11-85" aria-hidden="true" tabindex="-1"></a>merged <span class="op">=</span> pd.merge_asof(</span>
+<span id="cb11-86"><a href="#cb11-86" aria-hidden="true" tabindex="-1"></a>    df.sort_values(<span class="st">"측정일시_정시"</span>),</span>
+<span id="cb11-87"><a href="#cb11-87" aria-hidden="true" tabindex="-1"></a>    weather.sort_values(<span class="st">"측정일시"</span>),</span>
+<span id="cb11-88"><a href="#cb11-88" aria-hidden="true" tabindex="-1"></a>    left_on<span class="op">=</span><span class="st">"측정일시_정시"</span>,</span>
+<span id="cb11-89"><a href="#cb11-89" aria-hidden="true" tabindex="-1"></a>    right_on<span class="op">=</span><span class="st">"측정일시"</span>,</span>
+<span id="cb11-90"><a href="#cb11-90" aria-hidden="true" tabindex="-1"></a>    direction<span class="op">=</span><span class="st">"nearest"</span></span>
+<span id="cb11-91"><a href="#cb11-91" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb11-92"><a href="#cb11-92" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-93"><a href="#cb11-93" aria-hidden="true" tabindex="-1"></a>merged.drop(columns<span class="op">=</span>[<span class="st">"측정일시_정시"</span>], inplace<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb11-94"><a href="#cb11-94" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-95"><a href="#cb11-95" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb11-96"><a href="#cb11-96" aria-hidden="true" tabindex="-1"></a><span class="co"># 6️⃣ 저장</span></span>
+<span id="cb11-97"><a href="#cb11-97" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb11-98"><a href="#cb11-98" aria-hidden="true" tabindex="-1"></a>merged.to_csv(OUTPUT_PATH, index<span class="op">=</span><span class="va">False</span>, encoding<span class="op">=</span><span class="st">"utf-8-sig"</span>)</span>
+<span id="cb11-99"><a href="#cb11-99" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"✅ 최종 파일 저장 완료: </span><span class="sc">{</span>OUTPUT_PATH<span class="sc">}</span><span class="ss">"</span>)</span>
+<span id="cb11-100"><a href="#cb11-100" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"📊 최종 데이터 크기:"</span>, merged.shape)</span>
+<span id="cb11-101"><a href="#cb11-101" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-102"><a href="#cb11-102" aria-hidden="true" tabindex="-1"></a><span class="co"># 미리보기</span></span>
+<span id="cb11-103"><a href="#cb11-103" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(merged.head(<span class="dv">5</span>))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>📆 기간: 2024-12-01 ~ 2024-12-31
+🌤️ Open-Meteo 데이터 요청 중...
+✅ 날씨 데이터 수집 완료: (744, 16)
+✅ 최종 파일 저장 완료: ./data/fixed_train_weather_full.csv
+📊 최종 데이터 크기: (2976, 33)
+      id              측정일시_x        작업유형  year  month  day  hour  minute  \
+0  32159 2024-12-01 00:00:00  Light_Load  2024     12    1     0       0   
+1  32064 2024-12-01 00:15:00  Light_Load  2024     12    1     0      15   
+2  32065 2024-12-01 00:30:00  Light_Load  2024     12    1     0      30   
+3  32066 2024-12-01 00:45:00  Light_Load  2024     12    1     0      45   
+4  32067 2024-12-01 01:00:00  Light_Load  2024     12    1     1       0   
+
+   day_of_week  is_weekend  ...  비(mm)  적설(cm)  날씨코드  풍속(m/s)  풍향(°) 돌풍(m/s)  \
+0            6           1  ...    0.0     0.0     1      3.2    199     7.9   
+1            6           1  ...    0.0     0.0     1      3.2    199     7.9   
+2            6           1  ...    0.0     0.0     1      3.2    199     7.9   
+3            6           1  ...    0.0     0.0     1      3.2    199     7.9   
+4            6           1  ...    0.0     0.0     0      1.1    171     5.8   
+
+   구름량(%) 단파복사(W/m²)  기압(hPa)  일조시간(s)  
+0      21        0.0   1008.5      0.0  
+1      21        0.0   1008.5      0.0  
+2      21        0.0   1008.5      0.0  
+3      21        0.0   1008.5      0.0  
+4      12        0.0   1008.5      0.0  
+
+[5 rows x 33 columns]</code></pre>
+</div>
+</div>
+</section>
+<section id="train-과-test-컬럼-차이" class="level1">
+<h1>train 과 test 컬럼 차이</h1>
+<div id="139b4641" class="cell" data-execution_count="9">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb13"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a><span class="co"># 1️⃣ 파일 불러오기</span></span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a>path <span class="op">=</span> <span class="st">"./data/fixed_train_weather_full.csv"</span></span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> pd.read_csv(path)</span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"📂 원본 데이터 크기:"</span>, df.shape)</span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-10"><a href="#cb13-10" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb13-11"><a href="#cb13-11" aria-hidden="true" tabindex="-1"></a><span class="co"># 2️⃣ 제거 대상 컬럼 정의</span></span>
+<span id="cb13-12"><a href="#cb13-12" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb13-13"><a href="#cb13-13" aria-hidden="true" tabindex="-1"></a>remove_cols <span class="op">=</span> [</span>
+<span id="cb13-14"><a href="#cb13-14" aria-hidden="true" tabindex="-1"></a>    <span class="st">"carbon_per_kWh"</span>,    <span class="co"># 탄소배출량 파생</span></span>
+<span id="cb13-15"><a href="#cb13-15" aria-hidden="true" tabindex="-1"></a>    <span class="st">"kVAh"</span>,              <span class="co"># 전력사용량 기반 계산</span></span>
+<span id="cb13-16"><a href="#cb13-16" aria-hidden="true" tabindex="-1"></a>    <span class="st">"kW_15m"</span>,            <span class="co"># 단순 배수 변환</span></span>
+<span id="cb13-17"><a href="#cb13-17" aria-hidden="true" tabindex="-1"></a>    <span class="st">"pf_avg"</span>,            <span class="co"># 평균 역률 (지상/진상에서 파생)</span></span>
+<span id="cb13-18"><a href="#cb13-18" aria-hidden="true" tabindex="-1"></a>    <span class="st">"pf_low_flag"</span>,       <span class="co"># 역률 플래그 (파생)</span></span>
+<span id="cb13-19"><a href="#cb13-19" aria-hidden="true" tabindex="-1"></a>    <span class="st">"탄소배출량(tCO2)"</span>   <span class="co"># carbon_per_kWh와 중복</span></span>
+<span id="cb13-20"><a href="#cb13-20" aria-hidden="true" tabindex="-1"></a>]</span>
+<span id="cb13-21"><a href="#cb13-21" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-22"><a href="#cb13-22" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb13-23"><a href="#cb13-23" aria-hidden="true" tabindex="-1"></a><span class="co"># 3️⃣ 실제로 존재하는 컬럼만 필터링 후 제거</span></span>
+<span id="cb13-24"><a href="#cb13-24" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb13-25"><a href="#cb13-25" aria-hidden="true" tabindex="-1"></a>cols_to_drop <span class="op">=</span> [c <span class="cf">for</span> c <span class="kw">in</span> remove_cols <span class="cf">if</span> c <span class="kw">in</span> df.columns]</span>
+<span id="cb13-26"><a href="#cb13-26" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> df.drop(columns<span class="op">=</span>cols_to_drop, errors<span class="op">=</span><span class="st">"ignore"</span>)</span>
+<span id="cb13-27"><a href="#cb13-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-28"><a href="#cb13-28" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"🧹 제거된 컬럼: </span><span class="sc">{</span>cols_to_drop<span class="sc">}</span><span class="ss">"</span>)</span>
+<span id="cb13-29"><a href="#cb13-29" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"📊 정리 후 데이터 크기:"</span>, df.shape)</span>
+<span id="cb13-30"><a href="#cb13-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-31"><a href="#cb13-31" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb13-32"><a href="#cb13-32" aria-hidden="true" tabindex="-1"></a><span class="co"># 4️⃣ 중복 컬럼 이름 자동 제거 (merge 시 생긴 중복 등)</span></span>
+<span id="cb13-33"><a href="#cb13-33" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb13-34"><a href="#cb13-34" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> df.loc[:, <span class="op">~</span>df.columns.duplicated()]</span>
+<span id="cb13-35"><a href="#cb13-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-36"><a href="#cb13-36" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb13-37"><a href="#cb13-37" aria-hidden="true" tabindex="-1"></a><span class="co"># 5️⃣ 저장</span></span>
+<span id="cb13-38"><a href="#cb13-38" aria-hidden="true" tabindex="-1"></a><span class="co"># ---------------------------------------</span></span>
+<span id="cb13-39"><a href="#cb13-39" aria-hidden="true" tabindex="-1"></a>output_path <span class="op">=</span> <span class="st">"./data/fixed_train_clean.csv"</span></span>
+<span id="cb13-40"><a href="#cb13-40" aria-hidden="true" tabindex="-1"></a>df.to_csv(output_path, index<span class="op">=</span><span class="va">False</span>, encoding<span class="op">=</span><span class="st">"utf-8-sig"</span>)</span>
+<span id="cb13-41"><a href="#cb13-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-42"><a href="#cb13-42" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"✅ 최종 정리 완료: </span><span class="sc">{</span>output_path<span class="sc">}</span><span class="ss">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>📂 원본 데이터 크기: (2976, 33)
+🧹 제거된 컬럼: []
+📊 정리 후 데이터 크기: (2976, 33)
+✅ 최종 정리 완료: ./data/fixed_train_clean.csv</code></pre>
+</div>
+</div>
+<div id="3bd5d12a" class="cell" data-execution_count="10">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb15"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a><span class="co"># 파일 경로 지정</span></span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true" tabindex="-1"></a>train_path <span class="op">=</span> <span class="st">"./data/fixed_train_clean.csv"</span></span>
+<span id="cb15-5"><a href="#cb15-5" aria-hidden="true" tabindex="-1"></a>test_path <span class="op">=</span> <span class="st">"./data/fixed_test_weather_full.csv"</span></span>
+<span id="cb15-6"><a href="#cb15-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb15-7"><a href="#cb15-7" aria-hidden="true" tabindex="-1"></a><span class="co"># 파일 읽기</span></span>
+<span id="cb15-8"><a href="#cb15-8" aria-hidden="true" tabindex="-1"></a>train <span class="op">=</span> pd.read_csv(train_path)</span>
+<span id="cb15-9"><a href="#cb15-9" aria-hidden="true" tabindex="-1"></a>test <span class="op">=</span> pd.read_csv(test_path)</span>
+<span id="cb15-10"><a href="#cb15-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb15-11"><a href="#cb15-11" aria-hidden="true" tabindex="-1"></a><span class="co"># 컬럼 리스트 추출</span></span>
+<span id="cb15-12"><a href="#cb15-12" aria-hidden="true" tabindex="-1"></a>train_cols <span class="op">=</span> <span class="bu">set</span>(train.columns)</span>
+<span id="cb15-13"><a href="#cb15-13" aria-hidden="true" tabindex="-1"></a>test_cols <span class="op">=</span> <span class="bu">set</span>(test.columns)</span>
+<span id="cb15-14"><a href="#cb15-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb15-15"><a href="#cb15-15" aria-hidden="true" tabindex="-1"></a><span class="co"># 차이 비교</span></span>
+<span id="cb15-16"><a href="#cb15-16" aria-hidden="true" tabindex="-1"></a>only_in_train <span class="op">=</span> train_cols <span class="op">-</span> test_cols</span>
+<span id="cb15-17"><a href="#cb15-17" aria-hidden="true" tabindex="-1"></a>only_in_test <span class="op">=</span> test_cols <span class="op">-</span> train_cols</span>
+<span id="cb15-18"><a href="#cb15-18" aria-hidden="true" tabindex="-1"></a>common_cols <span class="op">=</span> train_cols <span class="op">&amp;</span> test_cols</span>
+<span id="cb15-19"><a href="#cb15-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb15-20"><a href="#cb15-20" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"✅ 공통 컬럼 개수:"</span>, <span class="bu">len</span>(common_cols))</span>
+<span id="cb15-21"><a href="#cb15-21" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"✅ 공통 컬럼:"</span>, <span class="bu">sorted</span>(<span class="bu">list</span>(common_cols)))</span>
+<span id="cb15-22"><a href="#cb15-22" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"</span><span class="ch">\n</span><span class="st">❌ train에만 있는 컬럼:"</span>, <span class="bu">sorted</span>(<span class="bu">list</span>(only_in_train)))</span>
+<span id="cb15-23"><a href="#cb15-23" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"</span><span class="ch">\n</span><span class="st">❌ test에만 있는 컬럼:"</span>, <span class="bu">sorted</span>(<span class="bu">list</span>(only_in_test)))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>✅ 공통 컬럼 개수: 33
+✅ 공통 컬럼: ['cos_day', 'cos_week', 'day', 'day_of_week', 'hour', 'id', 'is_holiday', 'is_weekend', 'minute', 'month', 'q15_index', 'season', 'sin_day', 'sin_week', 'year', '구름량(%)', '기압(hPa)', '기온(°C)', '날씨코드', '단파복사(W/m²)', '돌풍(m/s)', '비(mm)', '습도(%)', '이슬점(°C)', '일조시간(s)', '작업유형', '적설(cm)', '체감온도(°C)', '총강수량(mm)', '측정일시_x', '측정일시_y', '풍속(m/s)', '풍향(°)']
+
+❌ train에만 있는 컬럼: []
+
+❌ test에만 있는 컬럼: []</code></pre>
+</div>
+</div>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+        const codeEl = trigger.previousElementSibling.cloneNode(true);
+        for (const childEl of codeEl.children) {
+          if (isCodeAnnotation(childEl)) {
+            childEl.remove();
+          }
+        }
+        return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>

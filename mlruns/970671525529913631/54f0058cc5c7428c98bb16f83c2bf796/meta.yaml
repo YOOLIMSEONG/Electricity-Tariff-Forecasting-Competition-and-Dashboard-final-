@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/kbk29/Desktop/portfolio/mlruns/970671525529913631/54f0058cc5c7428c98bb16f83c2bf796/artifacts
+end_time: 1761552734001
+entry_point_name: ''
+experiment_id: '970671525529913631'
+lifecycle_stage: active
+run_id: 54f0058cc5c7428c98bb16f83c2bf796
+run_name: 진상역률(%)_trial
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1761552506189
+status: 3
+tags: []
+user_id: kbk29

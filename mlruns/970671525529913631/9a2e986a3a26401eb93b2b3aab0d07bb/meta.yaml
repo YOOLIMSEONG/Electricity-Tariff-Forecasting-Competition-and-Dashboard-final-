@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/kbk29/Desktop/portfolio/mlruns/970671525529913631/9a2e986a3a26401eb93b2b3aab0d07bb/artifacts
+end_time: 1761550501502
+entry_point_name: ''
+experiment_id: '970671525529913631'
+lifecycle_stage: active
+run_id: 9a2e986a3a26401eb93b2b3aab0d07bb
+run_name: 진상무효전력량(kVarh)_trial
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1761550324289
+status: 3
+tags: []
+user_id: kbk29
