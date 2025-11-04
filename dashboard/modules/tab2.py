@@ -31,6 +31,19 @@ WEEKDAY_LABELS = {
     6: "일",
 }
 DATA_PATH = Path(__file__).resolve().parents[1] / "data" / "train.csv"
+CO2_PRICE_PATH = Path(__file__).resolve().parents[1] / "data" / "CO2.csv"
+CO2_PRICE_SCENARIOS = {
+    "close": {"label": "종가", "column": "종가"},
+    "open": {"label": "시가", "column": "시가"},
+    "high": {"label": "고가", "column": "고가"},
+    "low": {"label": "저가", "column": "저가"},
+}
+DEFAULT_CO2_PRICE_SCENARIO = "close"
+DEFAULT_ALLOWANCE_PER_MONTH = 35.0
+ALLOWANCE_MIN = 20.0
+ALLOWANCE_MAX = 60.0
+ALLOWANCE_STEP = 1.0
+DAYS_PER_MONTH_EQUIVALENT = 30.0
 CACHE_VERSION = "midnight_adjust_v3"
 
 TARIFF_BASIC_RATES = {
@@ -113,6 +126,244 @@ def coalesce_number(value, default=0.0):
     if pd.isna(value):
         return default
     return float(value)
+
+
+def calculate_months_equiv(range_df, time_mode: str):
+    if range_df.empty:
+        return 0.0
+    if time_mode == "월별":
+        return 1.0
+    if time_mode == "전체":
+        months = range_df["측정일시"].dt.to_period("M").nunique()
+        if months:
+            return float(months)
+    start_date = range_df["측정일시"].min().normalize()
+    end_date = range_df["측정일시"].max().normalize()
+    days = (end_date - start_date).days + 1
+    if days <= 0:
+        return 0.0
+    return days / DAYS_PER_MONTH_EQUIVALENT
+
+
+def determine_emission_granularity(range_df: pd.DataFrame, time_mode: str) -> str:
+    """Select an aggregation grain for carbon visuals based on the active period."""
+    if range_df.empty:
+        return "monthly"
+    if time_mode == "전체":
+        return "monthly"
+    if time_mode == "월별":
+        return "daily"
+
+    start_day = range_df["측정일시"].min().normalize()
+    end_day = range_df["측정일시"].max().normalize()
+    day_span = (end_day - start_day).days + 1
+    if day_span <= 3:
+        return "hourly"
+    if day_span <= 21:
+        return "daily"
+    if day_span <= 90:
+        return "weekly"
+    return "monthly"
+
+
+def build_week_range_label(start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> str:
+    """Format a week range label using mm-dd~mm-dd style."""
+    return f"{start_ts.strftime('%m-%d')}~{end_ts.strftime('%m-%d')}"
+
+
+def build_emission_heatmap(
+    pivot: pd.DataFrame,
+    wrap_columns: int | None = None,
+    reverse_y: bool = True,
+) -> go.Figure | None:
+    if pivot.empty or pivot.columns.size == 0:
+        return None
+    pivot_numeric = pivot.astype(float)
+    pivot_series = pd.Series(pivot_numeric.values.ravel()).dropna()
+    threshold = float(pivot_series.median()) if not pivot_series.empty else 0.0
+
+    # When the pivot only has a single row with many columns, wrap the columns into
+    # multiple rows (e.g., weekly buckets) so that each cell remains readable.
+    if (
+        wrap_columns
+        and pivot_numeric.shape[0] == 1
+        and pivot_numeric.shape[1] > wrap_columns
+    ):
+        all_labels = [str(col) for col in pivot_numeric.columns]
+        values = pivot_numeric.iloc[0].tolist()
+        chunk_positions = list(range(1, wrap_columns + 1))
+        y_labels = []
+        z_matrix: list[list[float | None]] = []
+        text_x: list[int] = []
+        text_y: list[str] = []
+        text_val: list[str] = []
+        text_colors: list[str] = []
+        customdata: list[list[str]] = []
+
+        chunk_pairs = []
+        for start in range(0, len(all_labels), wrap_columns):
+            stop = min(start + wrap_columns, len(all_labels))
+            chunk_labels = all_labels[start:stop]
+            chunk_values = values[start:stop]
+            row_label = f"{chunk_labels[0]}~{chunk_labels[-1]}"
+            row_z: list[float | None] = []
+            row_custom: list[str] = []
+
+            for idx in range(wrap_columns):
+                if idx < len(chunk_labels):
+                    day_label = chunk_labels[idx]
+                    val = chunk_values[idx]
+                    row_z.append(val)
+                    row_custom.append(day_label)
+                    if pd.notna(val):
+                        text_x.append(idx + 1)
+                        text_y.append(row_label)
+                        text_val.append(f"{day_label}\n{format_number(val, 1)} tCO₂")
+                        text_colors.append(
+                            "#F8FAFC" if val >= threshold else "#0F172A"
+                        )
+                else:
+                    row_z.append(None)
+                    row_custom.append("")
+            chunk_pairs.append((row_label, row_z, row_custom))
+
+        for row_label, row_z, row_custom in chunk_pairs:
+            y_labels.append(row_label)
+            z_matrix.append(row_z)
+            customdata.append(row_custom)
+
+        heatmap_fig = go.Figure(
+            data=go.Heatmap(
+                z=z_matrix,
+                x=chunk_positions,
+                y=y_labels,
+                customdata=customdata,
+                hovertemplate="%{customdata}<br>%{z:.1f} tCO₂<extra></extra>",
+                colorscale=[
+                    [0.0, "#DBEAFE"],
+                    [0.4, "#2563EB"],
+                    [0.7, "#1E3A8A"],
+                    [1.0, "#0B1120"],
+                ],
+                colorbar=dict(title="tCO₂"),
+            )
+        )
+        if text_x:
+            heatmap_fig.add_trace(
+                go.Scatter(
+                    x=text_x,
+                    y=text_y,
+                    mode="text",
+                    text=text_val,
+                    textposition="middle center",
+                    textfont=dict(color=text_colors, size=13),
+                    hoverinfo="skip",
+                )
+            )
+        heatmap_fig.update_layout(
+            height=220,
+            template="plotly_dark",
+            margin=dict(l=10, r=10, t=30, b=20),
+            font=dict(color="#1A202C"),
+            paper_bgcolor="#F7FAFC",
+            plot_bgcolor="#F7FAFC",
+        )
+        heatmap_fig.update_xaxes(visible=False)
+        if reverse_y:
+            heatmap_fig.update_yaxes(autorange="reversed")
+        return heatmap_fig
+
+    x_labels = [str(col) for col in pivot_numeric.columns]
+    y_labels = [str(idx) for idx in pivot_numeric.index]
+    heatmap_fig = go.Figure(
+        data=go.Heatmap(
+            z=pivot_numeric.values,
+            x=x_labels,
+            y=y_labels,
+            hovertemplate="%{y}<br>%{x}<br>%{z:.1f} tCO₂<extra></extra>",
+            colorscale=[
+                [0.0, "#DBEAFE"],
+                [0.4, "#2563EB"],
+                [0.7, "#1E3A8A"],
+                [1.0, "#0B1120"],
+            ],
+            colorbar=dict(title="tCO₂"),
+        )
+    )
+    text_x = []
+    text_y = []
+    text_val = []
+    text_colors = []
+    for y_label, row in zip(y_labels, pivot_numeric.values):
+        for x_label, value in zip(x_labels, row):
+            if pd.isna(value):
+                continue
+            text_x.append(x_label)
+            text_y.append(y_label)
+            text_val.append(f"{format_number(value, 1)} tCO₂")
+            text_colors.append("#F8FAFC" if value >= threshold else "#0F172A")
+    if text_x:
+        heatmap_fig.add_trace(
+            go.Scatter(
+                x=text_x,
+                y=text_y,
+                mode="text",
+                text=text_val,
+                textposition="middle center",
+                textfont=dict(color=text_colors, size=13),
+                hoverinfo="skip",
+            )
+        )
+    heatmap_fig.update_layout(
+        height=220,
+        template="plotly_dark",
+        margin=dict(l=10, r=10, t=30, b=20),
+        font=dict(color="#1A202C"),
+        paper_bgcolor="#F7FAFC",
+        plot_bgcolor="#F7FAFC",
+    )
+    if reverse_y:
+        heatmap_fig.update_yaxes(autorange="reversed")
+    return heatmap_fig
+
+
+@st.cache_data(show_spinner=False)
+def load_co2_prices(_path: Path = CO2_PRICE_PATH):
+    try:
+        price_df = pd.read_csv(_path, parse_dates=["일자"])
+    except FileNotFoundError:
+        return pd.DataFrame(columns=["일자"])
+    numeric_cols = {info["column"] for info in CO2_PRICE_SCENARIOS.values()}
+    for col in numeric_cols:
+        if col not in price_df.columns:
+            continue
+        price_df[col] = (
+            price_df[col]
+            .astype(str)
+            .str.replace(",", "", regex=False)
+            .str.replace('"', "", regex=False)
+        )
+        price_df[col] = pd.to_numeric(price_df[col], errors="coerce")
+    price_df = price_df.dropna(subset=["일자"]).sort_values("일자")
+    return price_df
+
+
+def pick_co2_price(price_df, scenario_key: str, reference_date=None):
+    if price_df.empty:
+        return None, None
+    scenario = CO2_PRICE_SCENARIOS.get(scenario_key, CO2_PRICE_SCENARIOS[DEFAULT_CO2_PRICE_SCENARIO])
+    column = scenario["column"]
+    if column not in price_df.columns:
+        return None, None
+    filtered = price_df.dropna(subset=[column])
+    if reference_date is not None:
+        filtered = filtered[filtered["일자"] <= reference_date]
+        if filtered.empty:
+            filtered = price_df.dropna(subset=[column])
+    if filtered.empty:
+        return None, None
+    row = filtered.iloc[-1]
+    return row["일자"], row[column]
 
 
 def compute_overall_metrics(df: pd.DataFrame) -> pd.Series:
@@ -240,10 +491,10 @@ def render(title: str = "과거 데이터 분석"):
             font-weight: 600;
         }
         .metric-delta.positive {
-            color: #DC2626;
+            color: #2563EB;
         }
         .metric-delta.negative {
-            color: #2563EB;
+            color: #DC2626;
         }
         .metric-delta.neutral {
             color: #4A5568;
@@ -426,6 +677,8 @@ def render(title: str = "과거 데이터 분석"):
             label_visibility="collapsed",
         )
         selected_month = None
+        selected_month_period = None
+        trend_granularity = "monthly"
         custom_range = None
         available_months = list(monthly_summary.index)
         if time_mode == "월별":
@@ -691,8 +944,9 @@ def render(title: str = "과거 데이터 분석"):
         )
         daily_stats["평균단가(원/kWh)"] = daily_stats["전기요금_합계"] / daily_stats["전력사용량_합계"].replace({0: pd.NA})
 
+        chart_x_monthly = daily_stats["측정일시"].dt.normalize()
         chart_config = {
-            "x": daily_stats["날짜"],
+            "x": chart_x_monthly,
             "xaxis_title": "날짜",
             "usage_series": daily_stats["전력사용량_평균"],
             "usage_ma": daily_stats["전력사용량_평균_7일평균"],
@@ -804,6 +1058,7 @@ def render(title: str = "과거 데이터 분석"):
         unique_points_custom = range_df["측정일시"].nunique()
 
         if span_hours_custom <= 72 or unique_points_custom <= 288:
+            trend_granularity = "15min"
             fifteen_avg = (
                 range_df.groupby("측정일시")
                 .agg(
@@ -863,6 +1118,7 @@ def render(title: str = "과거 데이터 분석"):
             peak_source["피크수요전력(kW)"] = peak_source["피크전력사용량(kWh)"] * 4
             peak_source["평균수요전력(kW)"] = peak_source["평균전력사용량(kWh)"] * 4
         elif span_hours_custom <= 24 * 92:
+            trend_granularity = "daily"
             daily_stats = (
                 range_df.set_index("측정일시")
                 .resample("D")
@@ -889,8 +1145,9 @@ def render(title: str = "과거 데이터 분석"):
                 daily_stats["전기요금_평균"].rolling(window=7, min_periods=1).mean()
             )
             daily_stats["평균단가(원/kWh)"] = daily_stats["전기요금_합계"] / daily_stats["전력사용량_합계"].replace({0: pd.NA})
+            chart_x_custom_daily = daily_stats["측정일시"].dt.normalize()
             chart_config = {
-                "x": daily_stats["날짜"],
+                "x": chart_x_custom_daily,
                 "xaxis_title": "날짜",
                 "usage_series": daily_stats["전력사용량_평균"],
                 "usage_ma": daily_stats["전력사용량_평균_7일평균"],
@@ -948,6 +1205,7 @@ def render(title: str = "과거 데이터 분석"):
             peak_source["피크수요전력(kW)"] = peak_source["피크전력사용량(kWh)"] * 4
             peak_source["평균수요전력(kW)"] = peak_source["평균전력사용량(kWh)"] * 4
         else:
+            trend_granularity = "monthly"
             custom_monthly = (
                 range_df.assign(연월=range_df["측정일시"].dt.to_period("M"))
                 .groupby("연월")
@@ -1080,1469 +1338,2096 @@ def render(title: str = "과거 데이터 분석"):
         )
         st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown(f"#### {summary_title}")
-    metric_cols = st.columns(4, gap="large")
-    metrics = [
-        ("총 전력사용량(kWh)", "총전력사용량", 0, "kWh"),
-        ("총 전기요금(원)", "총전기요금", 0, "원"),
-        ("총 탄소배출량(tCO2)", "총탄소배출량", 2, "tCO2"),
-        ("평균 단가(원/kWh)", "평균단가", 2, "원/kWh"),
+    inner_tab_labels = [
+        "주요 지표",
+        "피크 분석",
+        "역률 분석 & 페널티",
+        "탄소배출량 분석",
     ]
-    for column, (title_text, key, decimals, unit) in zip(metric_cols, metrics):
-        with column:
-            if key in summary_series.index:
-                raw_value = summary_series[key]
-            else:
-                raw_value = pd.NA
-            formatted_value = format_number(raw_value, decimals=decimals)
-            change_html = ""
-            if monthly_change_map and key in monthly_change_map:
-                change_info = monthly_change_map[key]
-                change_pct = change_info.get("change_pct")
-                if change_pct is None:
-                    change_html = ""
-                else:
-                    if change_pct > 0:
-                        delta_class = "positive"
-                        pct_label = f"+{change_pct:.1f}%"
-                        direction_label = "증가"
-                    elif change_pct < 0:
-                        delta_class = "negative"
-                        pct_label = f"{change_pct:.1f}%"
-                        direction_label = "감소"
-                    else:
-                        delta_class = "neutral"
-                        pct_label = "0.0%"
-                        direction_label = "변화 없음"
-                    change_html = (
-                        f'<div class="metric-delta {delta_class}">전월 대비 '
-                        f'<strong>{pct_label}</strong> {direction_label}</div>'
-                    )
-            card_segments = [
-                '<div class="card metric-card">',
-                f'    <div class="card-title">{title_text}</div>',
-                '    <div class="metric-body">',
-                f'        <div class="metric-value">{formatted_value}<span class="metric-unit-inline">{unit}</span></div>',
-            ]
-            if change_html:
-                card_segments.append(f'        {change_html}')
-            else:
-                card_segments.append('        <div class="metric-delta metric-delta-empty">&nbsp;</div>')
-            card_segments.extend(
-                [
-                    '    </div>',
-                    '</div>',
-                ]
-            )
-            card_html = "\n".join(card_segments)
-            st.markdown(card_html, unsafe_allow_html=True)
+    overview_tab, peak_tab, pf_tab, carbon_tab = st.tabs(inner_tab_labels)
 
-    st.markdown("#### 월별 세부 추이")
-
-    daily_fig = go.Figure()
-    daily_fig.add_trace(
-        go.Scatter(
-            x=chart_config["x"],
-            y=chart_config["usage_series"],
-            mode="lines+markers",
-            name=chart_config["usage_label"],
-            line=dict(color="#14B8A6", width=2.4),
-            marker=dict(size=5),
-        )
-    )
-    daily_fig.add_trace(
-        go.Scatter(
-            x=chart_config["x"],
-            y=chart_config["usage_ma"],
-            mode="lines",
-            name=chart_config["usage_ma_label"],
-            line=dict(color="#2DD4BF", width=2, dash="dash"),
-        )
-    )
-    daily_fig.add_trace(
-        go.Scatter(
-            x=chart_config["x"],
-            y=chart_config["cost_series"],
-            mode="lines+markers",
-            name=chart_config["cost_label"],
-            line=dict(color="#6366F1", width=2.4),
-            marker=dict(size=5),
-            yaxis="y2",
-        )
-    )
-    daily_fig.add_trace(
-        go.Scatter(
-            x=chart_config["x"],
-            y=chart_config["cost_ma"],
-            mode="lines",
-            name=chart_config["cost_ma_label"],
-            line=dict(color="#A5B4FF", width=2, dash="dash"),
-            yaxis="y2",
-        )
-    )
-    xaxis_settings = dict(
-        title=dict(text=chart_config["xaxis_title"], font=dict(color="#1A202C")),
-        tickfont=dict(color="#1A202C"),
-    )
-    if "tickvals" in chart_config:
-        xaxis_settings["tickvals"] = chart_config["tickvals"]
-    if "ticktext" in chart_config:
-        xaxis_settings["ticktext"] = chart_config["ticktext"]
-
-    daily_fig.update_layout(
-        template="plotly_dark",
-        margin=dict(l=10, r=10, t=45, b=20),
-        hovermode="x unified",
-        font=dict(color="#1A202C"),
-        xaxis=xaxis_settings,
-        yaxis=dict(
-            title=dict(text="전력사용량 (kWh)", font=dict(color="#14B8A6")),
-            color="#14B8A6",
-            tickfont=dict(color="#4A5568"),
-        ),
-        yaxis2=dict(
-            title=dict(text="전기요금 (원)", font=dict(color="#6366F1")),
-            overlaying="y",
-            side="right",
-            color="#6366F1",
-            tickfont=dict(color="#4A5568"),
-        ),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            font=dict(color="#1A202C"),
-        ),
-        paper_bgcolor="#F7FAFC",
-        plot_bgcolor="#F7FAFC",
-    )
-    st.plotly_chart(daily_fig, config={"displayModeBar": True})
-
-    if detail_source.empty:
-        return
-
-    col_label, col_toggle, col_help, _ = st.columns([0.2, 0.05, 0.03, 0.72], gap="small")
-    with col_label:
-        st.markdown(
-            '<div class="detail-toggle-label">상세 보기 (15분 단위)</div>',
-            unsafe_allow_html=True,
-        )
-    with col_toggle:
-        detail_toggle = st.toggle(
-            "상세 보기 (15분 단위)",
-            value=st.session_state.get("tab3_detail_toggle", False),
-            key="tab3_detail_toggle",
-            label_visibility="collapsed",
-        )
-    with col_help:
-        st.markdown(
-            '<div class="toggle-help" data-tooltip="체크하면 선택 기간의 15분 단위 데이터가 표시됩니다.">?</div>',
-            unsafe_allow_html=True,
-        )
-    if detail_toggle:
-        start_date = detail_source["측정일시"].min().date()
-        end_date = detail_source["측정일시"].max().date()
-        date_range = st.date_input(
-            "상세 조회 기간",
-            value=(start_date, end_date),
-            min_value=start_date,
-            max_value=end_date,
-            format="YYYY-MM-DD",
-        )
-        if isinstance(date_range, tuple) and len(date_range) == 2:
-            detail_start, detail_end = date_range
-        else:
-            detail_start = start_date
-            detail_end = end_date
-
-        detail_df = detail_source[
-            (detail_source["측정일시"] >= pd.Timestamp(detail_start))
-            & (detail_source["측정일시"] < pd.Timestamp(detail_end) + pd.Timedelta(days=1))
+    with overview_tab:
+        st.markdown(f"#### {summary_title}")
+        metric_cols = st.columns(4, gap="large")
+        metrics = [
+            ("총 전력사용량(kWh)", "총전력사용량", 0, "kWh"),
+            ("총 전기요금(원)", "총전기요금", 0, "원"),
+            ("총 탄소배출량(tCO2)", "총탄소배출량", 2, "tCO2"),
+            ("평균 단가(원/kWh)", "평균단가", 2, "원/kWh"),
         ]
-
-        if detail_df.empty:
-            st.warning("선택한 기간에 해당하는 상세 데이터가 없습니다.")
-        else:
-            detail_fig = go.Figure()
-            detail_fig.add_trace(
-                go.Scatter(
-                    x=detail_df["측정일시"],
-                    y=detail_df["전력사용량(kWh)"],
-                    mode="lines",
-                    name="전력사용량(15분 단위)",
-                    line=dict(color="#14B8A6", width=1.8),
+        for column, (title_text, key, decimals, unit) in zip(metric_cols, metrics):
+            with column:
+                if key in summary_series.index:
+                    raw_value = summary_series[key]
+                else:
+                    raw_value = pd.NA
+                formatted_value = format_number(raw_value, decimals=decimals)
+                change_html = ""
+                if monthly_change_map and key in monthly_change_map:
+                    change_info = monthly_change_map[key]
+                    change_pct = change_info.get("change_pct")
+                    if change_pct is None:
+                        change_html = ""
+                    else:
+                        if change_pct > 0:
+                            delta_class = "positive"
+                            pct_label = f"+{change_pct:.1f}%"
+                            direction_label = "증가"
+                        elif change_pct < 0:
+                            delta_class = "negative"
+                            pct_label = f"{change_pct:.1f}%"
+                            direction_label = "감소"
+                        else:
+                            delta_class = "neutral"
+                            pct_label = "0.0%"
+                            direction_label = "변화 없음"
+                        change_html = (
+                            f'<div class="metric-delta {delta_class}">전월 대비 '
+                            f'<strong>{pct_label}</strong> {direction_label}</div>'
+                        )
+                card_segments = [
+                    '<div class="card metric-card">',
+                    f'    <div class="card-title">{title_text}</div>',
+                    '    <div class="metric-body">',
+                    f'        <div class="metric-value">{formatted_value}<span class="metric-unit-inline">{unit}</span></div>',
+                ]
+                if change_html:
+                    card_segments.append(f'        {change_html}')
+                else:
+                    card_segments.append('        <div class="metric-delta metric-delta-empty">&nbsp;</div>')
+                card_segments.extend(
+                    [
+                        '    </div>',
+                        '</div>',
+                    ]
                 )
+                card_html = "\n".join(card_segments)
+                st.markdown(card_html, unsafe_allow_html=True)
+
+        trend_title = "월별 세부 추이"
+        if time_mode == "월별":
+            trend_title = "일별 세부 추이"
+        elif time_mode == "사용자 정의":
+            if trend_granularity == "15min":
+                trend_title = "시간별 세부 추이"
+            elif trend_granularity == "daily":
+                trend_title = "일별 세부 추이"
+            elif trend_granularity == "monthly":
+                trend_title = "월별 세부 추이"
+            else:
+                trend_title = "세부 추이"
+
+        st.markdown(f"#### {trend_title}")
+
+        daily_fig = go.Figure()
+        daily_fig.add_trace(
+            go.Scatter(
+                x=chart_config["x"],
+                y=chart_config["usage_series"],
+                mode="lines+markers",
+                name=chart_config["usage_label"],
+                line=dict(color="#14B8A6", width=2.4),
+                marker=dict(size=5),
             )
-            detail_fig.add_trace(
-                go.Scatter(
-                    x=detail_df["측정일시"],
-                    y=detail_df["전기요금(원)"],
-                    mode="lines",
-                    name="전기요금(15분 단위)",
-                    line=dict(color="#6366F1", width=1.8),
-                    yaxis="y2",
-                )
-            )
-            detail_fig.update_layout(
-                template="plotly_dark",
-                margin=dict(l=10, r=10, t=45, b=20),
-                hovermode="x unified",
-                font=dict(color="#1A202C"),
-                xaxis=dict(
-                    title=dict(text="시간", font=dict(color="#1A202C")),
-                    tickfont=dict(color="#1A202C"),
-                ),
-                yaxis=dict(
-                    title=dict(text="전력사용량 (kWh)", font=dict(color="#14B8A6")),
-                    color="#14B8A6",
-                    tickfont=dict(color="#4A5568"),
-                ),
-                yaxis2=dict(
-                    title=dict(text="전기요금 (원)", font=dict(color="#6366F1")),
-                    overlaying="y",
-                    side="right",
-                    color="#6366F1",
-                    tickfont=dict(color="#4A5568"),
-                ),
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1,
-                    font=dict(color="#1A202C"),
-                ),
-                paper_bgcolor="#F7FAFC",
-                plot_bgcolor="#F7FAFC",
-            )
-            st.plotly_chart(detail_fig, config={"displayModeBar": True})
-
-    effective_end_ts = None
-    if time_mode == "전체":
-        effective_end_ts = raw_df["측정일시"].max() if not raw_df.empty else None
-    elif not range_df.empty:
-        effective_end_ts = range_df["측정일시"].max()
-
-    eligible_df = raw_df
-    if effective_end_ts is not None:
-        eligible_df = raw_df[raw_df["측정일시"] <= effective_end_ts]
-
-    seasonal_peak_kwh_map = {key: pd.NA for key in SEASON_GROUPS}
-    seasonal_peak_kw_map = {key: pd.NA for key in SEASON_GROUPS}
-    if not eligible_df.empty:
-        for season_key, season_info in SEASON_GROUPS.items():
-            season_df = eligible_df[eligible_df["측정일시"].dt.month.isin(season_info["months"])]
-            if season_df.empty:
-                continue
-            season_val = season_df["전력사용량(kWh)"].max()
-            if pd.isna(season_val):
-                continue
-            season_val = float(season_val)
-            seasonal_peak_kwh_map[season_key] = season_val
-            seasonal_peak_kw_map[season_key] = season_val * 4
-
-    peak_focus_months = []
-    if not eligible_df.empty:
-        monthly_peak_series = (
-            eligible_df.assign(__연월=eligible_df["측정일시"].dt.to_period("M"))
-            .groupby("__연월")["전력사용량(kWh)"]
-            .max()
-            .sort_values(ascending=False)
         )
-        for period_key, peak_value in monthly_peak_series.head(2).items():
-            label = format_month_label(str(period_key))
-            if pd.isna(peak_value):
-                peak_focus_months.append(label)
-                continue
-            peak_kw_value = float(peak_value) * 4
-            peak_focus_months.append(f"{label} ({format_number(peak_kw_value, 1)} kW)")
+        daily_fig.add_trace(
+            go.Scatter(
+                x=chart_config["x"],
+                y=chart_config["usage_ma"],
+                mode="lines",
+                name=chart_config["usage_ma_label"],
+                line=dict(color="#2DD4BF", width=2, dash="dash"),
+            )
+        )
+        daily_fig.add_trace(
+            go.Scatter(
+                x=chart_config["x"],
+                y=chart_config["cost_series"],
+                mode="lines+markers",
+                name=chart_config["cost_label"],
+                line=dict(color="#6366F1", width=2.4),
+                marker=dict(size=5),
+                yaxis="y2",
+            )
+        )
+        daily_fig.add_trace(
+            go.Scatter(
+                x=chart_config["x"],
+                y=chart_config["cost_ma"],
+                mode="lines",
+                name=chart_config["cost_ma_label"],
+                line=dict(color="#A5B4FF", width=2, dash="dash"),
+                yaxis="y2",
+            )
+        )
+        xaxis_settings = dict(
+            title=dict(text=chart_config["xaxis_title"], font=dict(color="#1A202C")),
+            tickfont=dict(color="#1A202C"),
+        )
+        if "tickvals" in chart_config:
+            xaxis_settings["tickvals"] = chart_config["tickvals"]
+        if "ticktext" in chart_config:
+            xaxis_settings["ticktext"] = chart_config["ticktext"]
 
-    st.markdown("#### 피크타임 분석")
-    peak_col_left, peak_col_right = st.columns([2, 1], gap="large")
+        daily_fig.update_layout(
+            template="plotly_dark",
+            margin=dict(l=10, r=10, t=45, b=20),
+            hovermode="x unified",
+            font=dict(color="#1A202C"),
+            xaxis=xaxis_settings,
+            yaxis=dict(
+                title=dict(text="전력사용량 (kWh)", font=dict(color="#14B8A6")),
+                color="#14B8A6",
+                tickfont=dict(color="#4A5568"),
+            ),
+            yaxis2=dict(
+                title=dict(text="전기요금 (원)", font=dict(color="#6366F1")),
+                overlaying="y",
+                side="right",
+                color="#6366F1",
+                tickfont=dict(color="#4A5568"),
+            ),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1,
+                font=dict(color="#1A202C"),
+            ),
+            paper_bgcolor="#F7FAFC",
+            plot_bgcolor="#F7FAFC",
+        )
+        st.plotly_chart(daily_fig, config={"displayModeBar": True})
 
-    if peak_source is None or (hasattr(peak_source, "empty") and peak_source.empty):
-        with peak_col_left:
-            st.info("피크 전력 데이터를 찾을 수 없습니다.")
-    else:
-        peak_fig = go.Figure()
-        seasonal_line_colors = {key: SEASON_STYLE.get(key, {}) for key in SEASON_GROUPS}
+        if detail_source.empty:
+            return
 
-        def add_seasonal_reference_lines(x_values):
-            x_list = list(x_values)
-            if not x_list:
-                return
-            if len(x_list) == 1:
-                x_list = x_list + x_list
+        col_label, col_toggle, col_help, _ = st.columns([0.2, 0.05, 0.03, 0.72], gap="small")
+        with col_label:
+            st.markdown(
+                '<div class="detail-toggle-label">상세 보기 (15분 단위)</div>',
+                unsafe_allow_html=True,
+            )
+        with col_toggle:
+            detail_toggle = st.toggle(
+                "상세 보기 (15분 단위)",
+                value=st.session_state.get("tab3_detail_toggle", False),
+                key="tab3_detail_toggle",
+                label_visibility="collapsed",
+            )
+        with col_help:
+            st.markdown(
+                '<div class="toggle-help" data-tooltip="체크하면 선택 기간의 15분 단위 데이터가 표시됩니다.">?</div>',
+                unsafe_allow_html=True,
+            )
+        if detail_toggle:
+            start_date = detail_source["측정일시"].min().date()
+            end_date = detail_source["측정일시"].max().date()
+            date_range = st.date_input(
+                "상세 조회 기간",
+                value=(start_date, end_date),
+                min_value=start_date,
+                max_value=end_date,
+                format="YYYY-MM-DD",
+            )
+            if isinstance(date_range, tuple) and len(date_range) == 2:
+                detail_start, detail_end = date_range
+            else:
+                detail_start = start_date
+                detail_end = end_date
+
+            detail_df = detail_source[
+                (detail_source["측정일시"] >= pd.Timestamp(detail_start))
+                & (detail_source["측정일시"] < pd.Timestamp(detail_end) + pd.Timedelta(days=1))
+            ]
+
+            if detail_df.empty:
+                st.warning("선택한 기간에 해당하는 상세 데이터가 없습니다.")
+            else:
+                detail_fig = go.Figure()
+                detail_fig.add_trace(
+                    go.Scatter(
+                        x=detail_df["측정일시"],
+                        y=detail_df["전력사용량(kWh)"],
+                        mode="lines",
+                        name="전력사용량(15분 단위)",
+                        line=dict(color="#14B8A6", width=1.8),
+                    )
+                )
+                detail_fig.add_trace(
+                    go.Scatter(
+                        x=detail_df["측정일시"],
+                        y=detail_df["전기요금(원)"],
+                        mode="lines",
+                        name="전기요금(15분 단위)",
+                        line=dict(color="#6366F1", width=1.8),
+                        yaxis="y2",
+                    )
+                )
+                detail_fig.update_layout(
+                    template="plotly_dark",
+                    margin=dict(l=10, r=10, t=45, b=20),
+                    hovermode="x unified",
+                    font=dict(color="#1A202C"),
+                    xaxis=dict(
+                        title=dict(text="시간", font=dict(color="#1A202C")),
+                        tickfont=dict(color="#1A202C"),
+                    ),
+                    yaxis=dict(
+                        title=dict(text="전력사용량 (kWh)", font=dict(color="#14B8A6")),
+                        color="#14B8A6",
+                        tickfont=dict(color="#4A5568"),
+                    ),
+                    yaxis2=dict(
+                        title=dict(text="전기요금 (원)", font=dict(color="#6366F1")),
+                        overlaying="y",
+                        side="right",
+                        color="#6366F1",
+                        tickfont=dict(color="#4A5568"),
+                    ),
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1,
+                        font=dict(color="#1A202C"),
+                    ),
+                    paper_bgcolor="#F7FAFC",
+                    plot_bgcolor="#F7FAFC",
+                )
+                st.plotly_chart(detail_fig, config={"displayModeBar": True})
+
+
+
+    with peak_tab:
+        effective_end_ts = None
+        if time_mode == "전체":
+            effective_end_ts = raw_df["측정일시"].max() if not raw_df.empty else None
+        elif not range_df.empty:
+            effective_end_ts = range_df["측정일시"].max()
+
+        eligible_df = raw_df
+        if effective_end_ts is not None:
+            eligible_df = raw_df[raw_df["측정일시"] <= effective_end_ts]
+
+        seasonal_peak_kwh_map = {key: pd.NA for key in SEASON_GROUPS}
+        seasonal_peak_kw_map = {key: pd.NA for key in SEASON_GROUPS}
+        if not eligible_df.empty:
             for season_key, season_info in SEASON_GROUPS.items():
-                season_value = seasonal_peak_kwh_map.get(season_key, pd.NA)
-                if pd.isna(season_value):
+                season_df = eligible_df[eligible_df["측정일시"].dt.month.isin(season_info["months"])]
+                if season_df.empty:
                     continue
-                style = seasonal_line_colors.get(season_key, {})
-                line_kwargs = {
-                    "color": style.get("color", "#94A3B8"),
-                    "width": 1.6,
-                    "dash": style.get("dash", "dot"),
-                }
+                season_val = season_df["전력사용량(kWh)"].max()
+                if pd.isna(season_val):
+                    continue
+                season_val = float(season_val)
+                seasonal_peak_kwh_map[season_key] = season_val
+                seasonal_peak_kw_map[season_key] = season_val * 4
+
+        peak_focus_months = []
+        if not eligible_df.empty:
+            monthly_peak_series = (
+                eligible_df.assign(__연월=eligible_df["측정일시"].dt.to_period("M"))
+                .groupby("__연월")["전력사용량(kWh)"]
+                .max()
+                .sort_values(ascending=False)
+            )
+            for period_key, peak_value in monthly_peak_series.head(2).items():
+                label = format_month_label(str(period_key))
+                if pd.isna(peak_value):
+                    peak_focus_months.append(label)
+                    continue
+                peak_kw_value = float(peak_value) * 4
+                peak_focus_months.append(f"{label} ({format_number(peak_kw_value, 1)} kW)")
+
+        st.markdown("#### 피크 확인")
+        peak_col_left, peak_col_right = st.columns([2, 1], gap="large")
+
+        if peak_source is None or (hasattr(peak_source, "empty") and peak_source.empty):
+            with peak_col_left:
+                st.info("피크 전력 데이터를 찾을 수 없습니다.")
+        else:
+            peak_fig = go.Figure()
+            seasonal_line_colors = {key: SEASON_STYLE.get(key, {}) for key in SEASON_GROUPS}
+
+            def add_seasonal_reference_lines(x_values):
+                x_list = list(x_values)
+                if not x_list:
+                    return
+                if len(x_list) == 1:
+                    x_list = x_list + x_list
+                for season_key, season_info in SEASON_GROUPS.items():
+                    season_value = seasonal_peak_kwh_map.get(season_key, pd.NA)
+                    if pd.isna(season_value):
+                        continue
+                    style = seasonal_line_colors.get(season_key, {})
+                    line_kwargs = {
+                        "color": style.get("color", "#94A3B8"),
+                        "width": 1.6,
+                        "dash": style.get("dash", "dot"),
+                    }
+                    peak_fig.add_trace(
+                        go.Scatter(
+                            x=x_list,
+                            y=[season_value] * len(x_list),
+                            mode="lines",
+                            name=f"{season_info['label']} 최대선",
+                            line=line_kwargs,
+                            legendgroup=f"season_{season_key}",
+                            legendrank=2 if season_key == "summer" else 3,
+                            hovertemplate=f"{season_info['label']} 최대선: %{{y:.1f}} kWh<extra></extra>",
+                        )
+                    )
+
+            def add_peak_reference_line(x_values, y_series):
+                if y_series.empty:
+                    return
+                peak_max = y_series.max()
+                if pd.isna(peak_max):
+                    return
+                x_list = list(x_values)
+                if not x_list:
+                    return
+                if len(x_list) == 1:
+                    x_list = x_list + x_list
                 peak_fig.add_trace(
                     go.Scatter(
                         x=x_list,
-                        y=[season_value] * len(x_list),
+                        y=[peak_max] * len(x_list),
                         mode="lines",
-                        name=f"{season_info['label']} 최대선",
-                        line=line_kwargs,
-                        legendgroup=f"season_{season_key}",
-                        legendrank=2 if season_key == "summer" else 3,
-                        hovertemplate=f"{season_info['label']} 최대선: %{{y:.1f}} kWh<extra></extra>",
+                        name="최대 피크",
+                        line=dict(color="#DC2626", width=2.6, dash="dashdot"),
+                        legendgroup="global_peak",
+                        legendrank=4,
+                        hovertemplate="최대 피크: %{y:.1f} kWh<extra></extra>",
                     )
                 )
-
-        def add_peak_reference_line(x_values, y_series):
-            if y_series.empty:
-                return
-            peak_max = y_series.max()
-            if pd.isna(peak_max):
-                return
-            x_list = list(x_values)
-            if not x_list:
-                return
-            if len(x_list) == 1:
-                x_list = x_list + x_list
-            peak_fig.add_trace(
-                go.Scatter(
-                    x=x_list,
-                    y=[peak_max] * len(x_list),
-                    mode="lines",
-                    name="최대 피크",
-                    line=dict(color="#DC2626", width=2.6, dash="dashdot"),
-                    legendgroup="global_peak",
-                    legendrank=4,
-                    hovertemplate="최대 피크: %{y:.1f} kWh<extra></extra>",
+                max_idx = y_series.idxmax()
+                try:
+                    marker_x = x_values.iloc[max_idx]
+                except AttributeError:
+                    marker_x = x_values[max_idx]
+                marker_y = peak_max
+                peak_fig.add_trace(
+                    go.Scatter(
+                        x=[marker_x],
+                        y=[marker_y],
+                        mode="markers",
+                        marker=dict(size=9, color="#DC2626", symbol="diamond"),
+                        name="최대 피크 지점",
+                        legendgroup="global_peak",
+                        showlegend=False,
+                        hovertemplate="최대 피크 지점<br>전력: %{y:.1f} kWh<extra></extra>",
+                    )
                 )
-            )
-            max_idx = y_series.idxmax()
-            try:
-                marker_x = x_values.iloc[max_idx]
-            except AttributeError:
-                marker_x = x_values[max_idx]
-            marker_y = peak_max
-            peak_fig.add_trace(
-                go.Scatter(
-                    x=[marker_x],
-                    y=[marker_y],
-                    mode="markers",
-                    marker=dict(size=9, color="#DC2626", symbol="diamond"),
-                    name="최대 피크 지점",
-                    legendgroup="global_peak",
-                    showlegend=False,
-                    hovertemplate="최대 피크 지점<br>전력: %{y:.1f} kWh<extra></extra>",
-                )
-            )
-        label_config = PEAK_MODE_LABELS.get(peak_mode, PEAK_MODE_LABELS["monthly"])
-        if peak_mode == "monthly":
-            peak_x = peak_source["월시작"]
-            peak_y = peak_source["피크전력사용량(kWh)"]
-            peak_fig.add_trace(
-                go.Scatter(
-                    x=peak_x,
-                    y=peak_y,
-                    mode="lines+markers",
-                    name=label_config["series"],
-                    line=dict(color="#14B8A6", width=2.4),
-                    marker=dict(size=6),
-                )
-            )
-            avg_series = peak_source.get("평균전력사용량(kWh)")
-            if avg_series is not None and not avg_series.isna().all():
+            label_config = PEAK_MODE_LABELS.get(peak_mode, PEAK_MODE_LABELS["monthly"])
+            if peak_mode == "monthly":
+                peak_x = peak_source["월시작"]
+                peak_y = peak_source["피크전력사용량(kWh)"]
                 peak_fig.add_trace(
                     go.Scatter(
                         x=peak_x,
-                        y=avg_series,
-                        mode="lines",
-                        name=label_config["avg"],
-                        line=dict(color="#6366F1", width=2, dash="dot"),
+                        y=peak_y,
+                        mode="lines+markers",
+                        name=label_config["series"],
+                        line=dict(color="#14B8A6", width=2.4),
+                        marker=dict(size=6),
                     )
                 )
-            add_seasonal_reference_lines(peak_x)
-            add_peak_reference_line(peak_x, peak_y)
-            ticktext = peak_source.get("표시월")
-            if ticktext is not None:
-                ticktext = ticktext.tolist()
-            else:
-                ticktext = [format_month_label(str(x)) for x in peak_source["월시작"].dt.strftime("%Y-%m")]
-            y_lower_bound = 120.0
-            if not peak_y.isna().all():
-                min_val = float(peak_y.min())
-                candidate = min(120.0, min_val - 5.0)
-                y_lower_bound = max(candidate, 0.0)
-            peak_fig.update_layout(
-                template="plotly_dark",
-                margin=dict(l=10, r=10, t=60, b=40),
-                font=dict(color="#1A202C"),
-                xaxis=dict(
-                    title=label_config["x_title"],
-                    tickvals=peak_x,
-                    ticktext=ticktext,
-                    tickfont=dict(color="#1A202C"),
-                ),
-                yaxis=dict(
-                    title="전력사용량 (kWh, 15분)",
-                    tickfont=dict(color="#1A202C"),
-                    range=[y_lower_bound, 160],
-                ),
-                legend=dict(
-                    orientation="h",
-                    y=1.10,
-                    x=0.5,
-                    xanchor="center",
-                    yanchor="bottom",
+                avg_series = peak_source.get("평균전력사용량(kWh)")
+                if avg_series is not None and not avg_series.isna().all():
+                    peak_fig.add_trace(
+                        go.Scatter(
+                            x=peak_x,
+                            y=avg_series,
+                            mode="lines",
+                            name=label_config["avg"],
+                            line=dict(color="#6366F1", width=2, dash="dot"),
+                        )
+                    )
+                add_seasonal_reference_lines(peak_x)
+                add_peak_reference_line(peak_x, peak_y)
+                ticktext = peak_source.get("표시월")
+                if ticktext is not None:
+                    ticktext = ticktext.tolist()
+                else:
+                    ticktext = [format_month_label(str(x)) for x in peak_source["월시작"].dt.strftime("%Y-%m")]
+                y_lower_bound = 120.0
+                if not peak_y.isna().all():
+                    min_val = float(peak_y.min())
+                    candidate = min(120.0, min_val - 5.0)
+                    y_lower_bound = max(candidate, 0.0)
+                peak_fig.update_layout(
+                    template="plotly_dark",
+                    margin=dict(l=10, r=10, t=60, b=40),
                     font=dict(color="#1A202C"),
-                ),
-                paper_bgcolor="#F7FAFC",
-                plot_bgcolor="#F7FAFC",
-            )
-        elif peak_mode == "daily":
-            peak_x = peak_source["날짜"]
-            peak_y = peak_source["피크전력사용량(kWh)"]
-            peak_fig.add_trace(
-                go.Scatter(
-                    x=peak_x,
-                    y=peak_y,
-                    mode="lines+markers",
-                    name=label_config["series"],
-                    line=dict(color="#14B8A6", width=2.4),
-                    marker=dict(size=6),
+                    xaxis=dict(
+                        title=label_config["x_title"],
+                        tickvals=peak_x,
+                        ticktext=ticktext,
+                        tickfont=dict(color="#1A202C"),
+                    ),
+                    yaxis=dict(
+                        title="전력사용량 (kWh, 15분)",
+                        tickfont=dict(color="#1A202C"),
+                        range=[y_lower_bound, 160],
+                    ),
+                    legend=dict(
+                        orientation="h",
+                        y=1.10,
+                        x=0.5,
+                        xanchor="center",
+                        yanchor="bottom",
+                        font=dict(color="#1A202C"),
+                    ),
+                    paper_bgcolor="#F7FAFC",
+                    plot_bgcolor="#F7FAFC",
                 )
-            )
-            avg_series = peak_source.get("평균전력사용량(kWh)")
-            if avg_series is not None and not avg_series.isna().all():
+            elif peak_mode == "daily":
+                peak_x = peak_source["날짜"]
+                peak_y = peak_source["피크전력사용량(kWh)"]
                 peak_fig.add_trace(
                     go.Scatter(
                         x=peak_x,
-                        y=avg_series,
-                        mode="lines",
-                        name=label_config["avg"],
-                        line=dict(color="#6366F1", width=2, dash="dot"),
+                        y=peak_y,
+                        mode="lines+markers",
+                        name=label_config["series"],
+                        line=dict(color="#14B8A6", width=2.4),
+                        marker=dict(size=6),
                     )
-            )
-            add_seasonal_reference_lines(peak_x)
-            add_peak_reference_line(peak_x, peak_y)
-            y_lower_bound_daily = 120.0
-            if not peak_y.isna().all():
-                min_val = float(peak_y.min())
-                candidate = min(120.0, min_val - 5.0)
-                y_lower_bound_daily = max(candidate, 0.0)
-            peak_fig.update_layout(
-                template="plotly_dark",
-                margin=dict(l=10, r=10, t=60, b=40),
-                font=dict(color="#1A202C"),
-                xaxis=dict(
-                    title=label_config["x_title"],
-                    tickfont=dict(color="#1A202C"),
-                ),
-                yaxis=dict(
-                    title="전력사용량 (kWh, 15분)",
-                    tickfont=dict(color="#1A202C"),
-                    range=[y_lower_bound_daily, 160],
-                ),
-                legend=dict(
-                    orientation="h",
-                    y=1.10,
-                    x=0.5,
-                    xanchor="center",
-                    yanchor="bottom",
-                    font=dict(color="#1A202C"),
-                ),
-                paper_bgcolor="#F7FAFC",
-                plot_bgcolor="#F7FAFC",
-            )
-        else:  # 15분 단위
-            peak_x = peak_source["측정일시"]
-            peak_y = peak_source["피크전력사용량(kWh)"]
-            peak_fig.add_trace(
-                go.Scatter(
-                    x=peak_x,
-                    y=peak_y,
-                    mode="lines",
-                    name=label_config["series"],
-                    line=dict(color="#14B8A6", width=1.8),
                 )
-            )
-            avg_kwh_line = None
-            if "평균전력사용량(kWh)" in peak_source.columns and not peak_source.empty:
-                avg_kwh_line = peak_source["평균전력사용량(kWh)"].iloc[0]
-            if pd.notna(avg_kwh_line):
+                avg_series = peak_source.get("평균전력사용량(kWh)")
+                if avg_series is not None and not avg_series.isna().all():
+                    peak_fig.add_trace(
+                        go.Scatter(
+                            x=peak_x,
+                            y=avg_series,
+                            mode="lines",
+                            name=label_config["avg"],
+                            line=dict(color="#6366F1", width=2, dash="dot"),
+                        )
+                )
+                add_seasonal_reference_lines(peak_x)
+                add_peak_reference_line(peak_x, peak_y)
+                y_lower_bound_daily = 120.0
+                if not peak_y.isna().all():
+                    min_val = float(peak_y.min())
+                    candidate = min(120.0, min_val - 5.0)
+                    y_lower_bound_daily = max(candidate, 0.0)
+                peak_fig.update_layout(
+                    template="plotly_dark",
+                    margin=dict(l=10, r=10, t=60, b=40),
+                    font=dict(color="#1A202C"),
+                    xaxis=dict(
+                        title=label_config["x_title"],
+                        tickfont=dict(color="#1A202C"),
+                    ),
+                    yaxis=dict(
+                        title="전력사용량 (kWh, 15분)",
+                        tickfont=dict(color="#1A202C"),
+                        range=[y_lower_bound_daily, 160],
+                    ),
+                    legend=dict(
+                        orientation="h",
+                        y=1.10,
+                        x=0.5,
+                        xanchor="center",
+                        yanchor="bottom",
+                        font=dict(color="#1A202C"),
+                    ),
+                    paper_bgcolor="#F7FAFC",
+                    plot_bgcolor="#F7FAFC",
+                )
+            else:  # 15분 단위
+                peak_x = peak_source["측정일시"]
+                peak_y = peak_source["피크전력사용량(kWh)"]
                 peak_fig.add_trace(
                     go.Scatter(
                         x=peak_x,
-                        y=[avg_kwh_line] * len(peak_x),
+                        y=peak_y,
                         mode="lines",
-                        name=label_config["avg"],
-                        line=dict(color="#6366F1", width=2, dash="dot"),
+                        name=label_config["series"],
+                        line=dict(color="#14B8A6", width=1.8),
                     )
                 )
-            add_seasonal_reference_lines(peak_x)
-            add_peak_reference_line(peak_x, peak_y)
-            y_lower_bound_15 = 120.0
-            if not peak_y.isna().all():
-                min_val = float(peak_y.min())
-                candidate = min(120.0, min_val - 5.0)
-                y_lower_bound_15 = max(candidate, 0.0)
-            peak_fig.update_layout(
-                template="plotly_dark",
-                margin=dict(l=10, r=10, t=60, b=40),
-                font=dict(color="#1A202C"),
-                xaxis=dict(
-                    title=label_config["x_title"],
-                    tickfont=dict(color="#1A202C"),
-                ),
-                yaxis=dict(
-                    title="전력사용량 (kWh, 15분)",
-                    tickfont=dict(color="#1A202C"),
-                    range=[y_lower_bound_15, 160],
-                ),
-                legend=dict(
-                    orientation="h",
-                    y=1.10,
-                    x=0.5,
-                    xanchor="center",
-                    yanchor="bottom",
+                avg_kwh_line = None
+                if "평균전력사용량(kWh)" in peak_source.columns and not peak_source.empty:
+                    avg_kwh_line = peak_source["평균전력사용량(kWh)"].iloc[0]
+                if pd.notna(avg_kwh_line):
+                    peak_fig.add_trace(
+                        go.Scatter(
+                            x=peak_x,
+                            y=[avg_kwh_line] * len(peak_x),
+                            mode="lines",
+                            name=label_config["avg"],
+                            line=dict(color="#6366F1", width=2, dash="dot"),
+                        )
+                    )
+                add_seasonal_reference_lines(peak_x)
+                add_peak_reference_line(peak_x, peak_y)
+                y_lower_bound_15 = 120.0
+                if not peak_y.isna().all():
+                    min_val = float(peak_y.min())
+                    candidate = min(120.0, min_val - 5.0)
+                    y_lower_bound_15 = max(candidate, 0.0)
+                peak_fig.update_layout(
+                    template="plotly_dark",
+                    margin=dict(l=10, r=10, t=60, b=40),
                     font=dict(color="#1A202C"),
-                ),
-                paper_bgcolor="#F7FAFC",
-                plot_bgcolor="#F7FAFC",
-            )
-        with peak_col_left:
-            st.plotly_chart(peak_fig, config={"displayModeBar": True})
-
-    if top_records.empty:
-        with peak_col_right:
-            st.info("피크 전력 상위 데이터를 표시할 수 없습니다.")
-    else:
-        ratio = None
-        if pd.notna(peak_max_value) and pd.notna(peak_avg_value) and peak_avg_value != 0:
-            ratio = peak_max_value / peak_avg_value * 100
-        cards_html = """
-            <div style="display:flex; gap:12px; margin-bottom:12px;">
-                <div class="card" style="flex:1; padding:12px 14px;">
-                    <div class="card-title" style="font-size:13px;">최대 전력량 (kWh)</div>
-                    <div style="font-size:24px; font-weight:600;">{max_val}</div>
-                </div>
-                <div class="card" style="flex:1; padding:12px 14px;">
-                    <div class="card-title" style="font-size:13px;">평균 대비</div>
-                    <div style="font-size:24px; font-weight:600;">{ratio_val}</div>
-                </div>
-            </div>
-        """.format(
-            max_val=format_number(peak_max_value, decimals=2),
-            ratio_val=f"{ratio:,.1f}%" if ratio is not None else "-",
-        )
-        styled_df = top_records.copy()
-        styled_df["요일"] = styled_df["측정일시"].dt.dayofweek.map(WEEKDAY_LABELS)
-        styled_df["측정일시"] = styled_df["측정일시"].dt.strftime("%Y-%m-%d %H:%M")
-        styled_df["전력사용량(kWh)"] = styled_df["전력사용량(kWh)"].apply(lambda v: format_number(v, 2))
-        display_df = styled_df[["id", "측정일시", "요일", "전력사용량(kWh)"]].rename(
-            columns={
-                "id": "ID",
-                "측정일시": "측정일시",
-                "요일": "요일",
-                "전력사용량(kWh)": "전력사용량(kWh)",
-            }
-        )
-        table_css = """
-            <style>
-            .peak-table-wrap {
-                background: rgba(255, 255, 255, 0.9);
-                border: 1px solid rgba(148, 163, 184, 0.35);
-                border-radius: 14px;
-                padding: 8px 10px 2px 10px;
-                overflow: hidden;
-            }
-            .peak-table-wrap table {
-                width: 100%;
-                border-collapse: collapse;
-                color: #1A202C;
-                font-size: 13px;
-            }
-            .peak-table-wrap thead th {
-                text-align: left;
-                padding: 8px 10px;
-                font-weight: 600;
-                color: #6366F1;
-                border-bottom: 1px solid rgba(148, 163, 184, 0.25);
-            }
-            .peak-table-wrap tbody td {
-                padding: 10px 10px;
-                border-bottom: 1px solid rgba(226, 232, 240, 0.5);
-            }
-            .peak-table-wrap tbody tr:last-child td {
-                border-bottom: none;
-            }
-            </style>
-        """
-        table_html = display_df.to_html(index=False, border=0, classes="peak-table-table")
-        with peak_col_right:
-            st.markdown(cards_html, unsafe_allow_html=True)
-            st.markdown(table_css, unsafe_allow_html=True)
-            st.markdown(f'<div class="peak-table-wrap">{table_html}</div>', unsafe_allow_html=True)
-
-    st.markdown("### 피크 비용 분석")
-    with st.container():
-        tariff_categories = list(TARIFF_BASIC_RATES.keys())
-        default_category = DEFAULT_TARIFF_SELECTION[0] if DEFAULT_TARIFF_SELECTION[0] in tariff_categories else tariff_categories[0]
-
-        config_cols = st.columns([1.3, 1.3, 1.3, 1.0], gap="large")
-        with config_cols[0]:
-            selected_tariff = st.selectbox(
-                "요금제",
-                options=tariff_categories,
-                index=tariff_categories.index(default_category),
-                key="tab2_peak_tariff_category",
-            )
-
-        available_voltages = list_tariff_voltages(selected_tariff)
-        if not available_voltages:
-            st.warning("선택한 요금제에서 전압 정보를 찾을 수 없습니다.")
-            return
-
-        default_voltage = DEFAULT_TARIFF_SELECTION[1] if DEFAULT_TARIFF_SELECTION[1] in available_voltages else available_voltages[0]
-        with config_cols[1]:
-            selected_voltage = st.selectbox(
-                "전압 등급",
-                options=available_voltages,
-                index=available_voltages.index(default_voltage),
-                key="tab2_peak_tariff_voltage",
-            )
-
-        option_map = list_tariff_options(selected_tariff, selected_voltage)
-        option_keys = list(option_map.keys())
-        option_placeholder = "-"
-        if not option_keys:
-            selected_option = ""
-        elif len(option_keys) == 1 and option_keys[0] == "":
-            selected_option = ""
-        else:
-            default_option = DEFAULT_TARIFF_SELECTION[2] if DEFAULT_TARIFF_SELECTION[2] in option_keys else option_keys[0]
-            with config_cols[2]:
-                selected_option = st.selectbox(
-                    "옵션",
-                    options=option_keys,
-                    index=option_keys.index(default_option),
-                    format_func=format_option_label,
-                    key="tab2_peak_tariff_option",
-                )
-        if not option_map or (len(option_keys) == 1 and option_keys[0] == ""):
-            with config_cols[2]:
-                st.markdown("옵션")
-                st.markdown("<div style='font-size:14px;color:#4A5568;'>기본</div>", unsafe_allow_html=True)
-
-        base_rate = get_basic_rate(selected_tariff, selected_voltage, selected_option if option_keys else "")
-        with config_cols[3]:
-            if base_rate is not None:
-                st.metric("기본요금 단가", f"{format_number(base_rate, 0)} 원/kW")
-            else:
-                st.metric("기본요금 단가", "-")
-
-        if base_rate is None:
-            st.warning("선택한 조건에 해당하는 기본요금 단가를 확인할 수 없습니다.")
-            return
-
-        period_peak_kwh = pd.NA
-        period_avg_kwh = pd.NA
-        if not range_df.empty:
-            peak_val = range_df["전력사용량(kWh)"].max()
-            mean_val = range_df["전력사용량(kWh)"].mean()
-            if pd.notna(peak_val):
-                period_peak_kwh = float(peak_val)
-            if pd.notna(mean_val):
-                period_avg_kwh = float(mean_val)
-
-        billing_peak_kwh = pd.NA
-        billing_peak_label = "누적 최대"
-        billing_peak_display = None
-        if not eligible_df.empty:
-            try:
-                billing_idx = eligible_df["전력사용량(kWh)"].idxmax()
-            except ValueError:
-                billing_idx = None
-            if billing_idx is not None and pd.notna(billing_idx):
-                billing_row = eligible_df.loc[billing_idx]
-                billing_peak_kwh = float(billing_row["전력사용량(kWh)"])
-                billing_ts = billing_row["측정일시"]
-                if pd.notna(billing_ts):
-                    billing_peak_display = pd.to_datetime(billing_ts).strftime("%Y-%m-%d %H:%M")
-                    billing_peak_label = f"누적 최대 ({billing_peak_display})"
-
-        current_peak_kw_for_charge = billing_peak_kwh * 4 if pd.notna(billing_peak_kwh) else pd.NA
-        avg_kw_current = period_avg_kwh * 4 if pd.notna(period_avg_kwh) else pd.NA
-
-        demand_candidates = []
-        if pd.notna(current_peak_kw_for_charge):
-            demand_candidates.append((billing_peak_label, current_peak_kw_for_charge))
-
-        seasonal_peaks = seasonal_peak_kwh_map
-        for season_key, season_info in SEASON_GROUPS.items():
-            season_kw = seasonal_peak_kw_map.get(season_key, pd.NA)
-            if pd.notna(season_kw):
-                demand_candidates.append((season_info["label"], season_kw))
-
-    if pd.notna(global_peak_kw) and global_peak_timestamp is not None:
-        if effective_end_ts is None or global_peak_timestamp <= effective_end_ts:
-            global_label = "연중 최대"
-            if global_peak_display:
-                global_label = f"{global_label} ({global_peak_display})"
-            demand_candidates.append((global_label, global_peak_kw))
-
-    if not demand_candidates:
-        st.warning("청구 수요전력을 계산할 데이터를 찾을 수 없습니다.")
-        return
-
-    chargeable_label, chargeable_kw = max(demand_candidates, key=lambda item: item[1])
-    peak_charge = chargeable_kw * base_rate if pd.notna(chargeable_kw) else pd.NA
-    avg_charge = avg_kw_current * base_rate if pd.notna(avg_kw_current) else pd.NA
-    charge_gap = pd.NA
-    if pd.notna(peak_charge) and pd.notna(avg_charge):
-        charge_gap = peak_charge - avg_charge
-
-    ratio_against_avg = None
-    if pd.notna(avg_kw_current) and avg_kw_current != 0 and pd.notna(chargeable_kw):
-        ratio_against_avg = (chargeable_kw / avg_kw_current - 1) * 100
-
-    def render_metric_card(column, title, value, unit, decimals=1, extra_html=""):
-        with column:
-            if pd.isna(value):
-                display_value = "-"
-            else:
-                display_value = format_number(value, decimals=decimals)
-            card_parts = [
-                '<div class="card metric-card">',
-                f'  <div class="card-title">{title}</div>',
-                '  <div class="metric-body">',
-                f'    <div class="metric-value">{display_value}<span class="metric-unit-inline">{unit}</span></div>',
-            ]
-            if extra_html:
-                card_parts.append(f"    {extra_html}")
-            else:
-                card_parts.append('    <div class="metric-delta metric-delta-empty">&nbsp;</div>')
-            card_parts.extend(["  </div>", "</div>"])
-            st.markdown("\n".join(card_parts), unsafe_allow_html=True)
-
-    card_row_one = st.columns(3, gap="large")
-    render_metric_card(
-        card_row_one[0],
-        "기간 최대수요전력",
-        period_peak_kwh,
-        "kWh (15분)",
-        decimals=1,
-    )
-
-    if pd.notna(period_peak_kwh) and pd.notna(period_avg_kwh) and period_peak_kwh != 0:
-        diff_pct = (period_avg_kwh / period_peak_kwh - 1) * 100
-        delta_class = "positive" if diff_pct > 0 else "negative" if diff_pct < 0 else "neutral"
-        avg_delta_html = f'<div class="metric-delta {delta_class}">기간 최대 대비 <strong>{diff_pct:+.1f}%</strong></div>'
-    else:
-        avg_delta_html = ""
-
-    render_metric_card(
-        card_row_one[1],
-        "평균 수요전력",
-        period_avg_kwh,
-        "kWh (15분)",
-        decimals=1,
-        extra_html=avg_delta_html,
-    )
-
-    charge_extra_html = f'<div class="metric-delta neutral">기준: {chargeable_label}</div>'
-    render_metric_card(
-        card_row_one[2],
-        "청구 수요전력",
-        chargeable_kw,
-        "kW",
-        decimals=1,
-        extra_html=charge_extra_html,
-    )
-
-    card_row_two = st.columns(3, gap="large")
-    render_metric_card(
-        card_row_two[0],
-        "기본요금 (청구 기준)",
-        peak_charge,
-        "원",
-        decimals=0,
-    )
-    render_metric_card(
-        card_row_two[1],
-        "기본요금 (평균 가정)",
-        avg_charge,
-        "원",
-        decimals=0,
-    )
-
-    gap_html = ""
-    if pd.notna(charge_gap):
-        if charge_gap > 0:
-            gap_class = "positive"
-            label = "추가 비용"
-        elif charge_gap < 0:
-            gap_class = "negative"
-            label = "절감 효과"
-        else:
-            gap_class = "neutral"
-            label = "변동 없음"
-        gap_html = f'<div class="metric-delta {gap_class}">{label}</div>'
-    render_metric_card(
-        card_row_two[2],
-        "피크로 인한 비용 차이",
-        charge_gap,
-        "원",
-        decimals=0,
-        extra_html=gap_html,
-    )
-
-    scenario_container = st.container()
-    with scenario_container:
-        st.markdown(
-            "<div style='font-size:18px;font-weight:600;color:#1A202C;margin-bottom:8px;'>피크 변동 가정</div>",
-            unsafe_allow_html=True,
-        )
-        slider_cols = st.columns([2.2, 1.8], gap="large")
-        with slider_cols[0]:
-            change_pct = st.slider(
-                "피크 변동 가정",
-                min_value=-20.0,
-                max_value=20.0,
-                value=0.0,
-                step=0.5,
-                format="%+.1f%%",
-                key="tab2_peak_change_pct",
-                help="연간 최대 수요전력이 얼마나 변한다고 가정할지 설정하세요. 감소는 음수, 증가는 양수를 사용합니다.",
-                label_visibility="collapsed",
-            )
-        with slider_cols[1]:
-            if peak_focus_months:
-                focus_text = " · ".join(peak_focus_months)
-                st.markdown(
-                    f"<div style='font-size:13px;color:#4A5568;line-height:1.6;'><strong>현재 데이터 기준 피크 집중 월</strong><br>{focus_text}</div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    "<div style='font-size:13px;color:#4A5568;line-height:1.6;'>현재 데이터에서 피크 집중 월 정보를 확인할 수 없습니다.</div>",
-                    unsafe_allow_html=True,
-                )
-
-    change_factor = 1 + change_pct / 100.0
-    scenario_chargeable_kw = chargeable_kw * change_factor if pd.notna(chargeable_kw) else pd.NA
-    scenario_billing_peak_kwh = billing_peak_kwh * change_factor if pd.notna(billing_peak_kwh) else pd.NA
-    scenario_peak_charge = scenario_chargeable_kw * base_rate if pd.notna(scenario_chargeable_kw) else pd.NA
-
-    delta_kw = pd.NA
-    if pd.notna(chargeable_kw) and pd.notna(scenario_chargeable_kw):
-        delta_kw = scenario_chargeable_kw - chargeable_kw
-
-    delta_charge = pd.NA
-    if pd.notna(peak_charge) and pd.notna(scenario_peak_charge):
-        delta_charge = scenario_peak_charge - peak_charge
-
-    scenario_kw_delta_html = ""
-    if pd.notna(delta_kw):
-        if abs(delta_kw) > 1e-6:
-            kw_direction = "증가" if delta_kw > 0 else "감소"
-            kw_class = "negative" if delta_kw > 0 else "positive"
-            scenario_kw_delta_html = f'<div class="metric-delta {kw_class}">{kw_direction} {format_number(abs(delta_kw), 1)} kW</div>'
-        else:
-            scenario_kw_delta_html = '<div class="metric-delta neutral">변동 없음</div>'
-
-    scenario_charge_delta_html = ""
-    scenario_cost_effect_html = ""
-
-    scenario_cards = st.columns(3, gap="large")
-    render_metric_card(
-        scenario_cards[0],
-        "변동 적용 수요전력",
-        scenario_chargeable_kw,
-        "kW",
-        decimals=1,
-        extra_html=scenario_kw_delta_html,
-    )
-    render_metric_card(
-        scenario_cards[1],
-        "기본요금 (변동 가정)",
-        scenario_peak_charge,
-        "원",
-        decimals=0,
-        extra_html=scenario_charge_delta_html,
-    )
-    render_metric_card(
-        scenario_cards[2],
-        "비용 영향",
-        delta_charge,
-        "원",
-        decimals=0,
-        extra_html=scenario_cost_effect_html,
-    )
-
-    note_lines = []
-    if pd.notna(billing_peak_kwh):
-        if billing_peak_display:
-            note_lines.append(f"- 현재 범위까지 누적된 최대수요전력(15분): {format_number(billing_peak_kwh, 1)} kWh ({billing_peak_display})")
-        else:
-            note_lines.append(f"- 현재 범위까지 누적된 최대수요전력(15분): {format_number(billing_peak_kwh, 1)} kWh")
-    note_lines.append(f"- 청구 수요전력 기준: {chargeable_label} ({format_number(chargeable_kw, 1)} kW)")
-    if pd.notna(global_peak_kw):
-        if global_peak_display:
-            note_lines.append(f"- 연중 최대수요전력: {format_number(global_peak_kw, 1)} kW ({global_peak_display})")
-        else:
-            note_lines.append(f"- 연중 최대수요전력: {format_number(global_peak_kw, 1)} kW")
-    for season_key, season_info in SEASON_GROUPS.items():
-        value = seasonal_peaks.get(season_key, pd.NA)
-        if pd.notna(value):
-            note_lines.append(f"- {season_info['label']} 최대수요전력(15분): {format_number(value, 1)} kWh")
-        else:
-            note_lines.append(f"- {season_info['label']} 최대수요전력: 데이터 없음")
-    note_lines.append("- 청구 수요전력은 연중 최대, 하계, 동계 최대 중 가장 큰 값으로 가정했습니다.")
-    if peak_focus_months:
-        note_lines.append(f"- 최근 피크 집중 월: {', '.join(peak_focus_months)}")
-    if not eligible_df.empty:
-        eligible_start = eligible_df["측정일시"].min()
-        eligible_end = eligible_df["측정일시"].max()
-        note_lines.append(f"- 분석 데이터 범위: {eligible_start:%Y-%m-%d} ~ {eligible_end:%Y-%m-%d}")
-    if change_pct != 0:
-        if pd.notna(scenario_billing_peak_kwh):
-            note_lines.append(f"- 변동 가정 최대수요전력(15분): {format_number(scenario_billing_peak_kwh, 1)} kWh")
-        if pd.notna(scenario_chargeable_kw):
-            direction_word = "감소" if change_pct < 0 else "증가"
-            note_lines.append(f"- {abs(change_pct):.1f}% {direction_word} 시 청구 수요전력: {format_number(scenario_chargeable_kw, 1)} kW")
-        if pd.notna(scenario_peak_charge):
-            note_lines.append(f"- 변동 가정 기본요금: {format_number(scenario_peak_charge, 0)} 원")
-        if pd.notna(delta_charge):
-            if delta_charge > 0:
-                note_lines.append(f"- 예상 추가 비용: {format_number(delta_charge, 0)} 원")
-            elif delta_charge < 0:
-                note_lines.append(f"- 예상 절감액: {format_number(-delta_charge, 0)} 원")
-    else:
-        note_lines.append("- 피크 변동 슬라이더로 증가·감소 시나리오를 조정하며 비용 변화를 확인할 수 있습니다.")
-    if ratio_against_avg is not None:
-        note_lines.append(f"- 청구 수요전력은 평균 대비 약 {ratio_against_avg:+.1f}% 차이가 있습니다.")
-
-    note_html = "<br>".join(note_lines)
-    st.markdown(
-        f"""
-        <div class="card" style="margin-top:12px;">
-            <div class="card-title">피크 정책 참고</div>
-            <div style="font-size:13px; color:#4A5568; line-height:1.6;">
-                {note_html}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("### 역률 분석 & 페널티")
-    with st.container():
-        required_columns = {"지상역률(%)", "진상역률(%)", "지상무효전력량(kVarh)", "진상무효전력량(kVarh)"}
-        if range_df.empty or not required_columns.intersection(range_df.columns):
-            st.info("역률 분석을 위한 데이터를 찾을 수 없습니다.")
-        else:
-            pf_df = range_df.copy()
-            for col in ["지상역률(%)", "진상역률(%)", "지상무효전력량(kVarh)", "진상무효전력량(kVarh)"]:
-                if col in pf_df.columns:
-                    pf_df[col] = pd.to_numeric(pf_df[col], errors="coerce")
-            pf_df["hour"] = pf_df["측정일시"].dt.hour
-
-            day_mask = pf_df["hour"].between(PF_DAY_START_HOUR, PF_DAY_END_HOUR - 1)
-            night_mask = ~day_mask
-
-            day_pf = pf_df.loc[day_mask, "지상역률(%)"].dropna()
-            night_pf = pf_df.loc[night_mask, "진상역률(%)"].dropna()
-
-            day_pf_capped = day_pf.clip(lower=PF_MIN_LIMIT, upper=PF_DAY_MAX_LIMIT) if not day_pf.empty else day_pf
-            night_pf_capped = night_pf.clip(lower=PF_MIN_LIMIT, upper=PF_NIGHT_MAX_LIMIT) if not night_pf.empty else night_pf
-
-            day_avg_actual = float(day_pf.mean()) if not day_pf.empty else pd.NA
-            night_avg_actual = float(night_pf.mean()) if not night_pf.empty else pd.NA
-            day_avg_capped = float(day_pf_capped.mean()) if not day_pf_capped.empty else pd.NA
-            night_avg_capped = float(night_pf_capped.mean()) if not night_pf_capped.empty else pd.NA
-
-            day_violation_ratio = float((day_pf < PF_DAY_THRESHOLD).mean() * 100) if not day_pf.empty else pd.NA
-            night_violation_ratio = float((night_pf < PF_NIGHT_THRESHOLD).mean() * 100) if not night_pf.empty else pd.NA
-
-            day_df = pf_df.loc[day_mask].copy()
-            night_df = pf_df.loc[night_mask].copy()
-            if not day_df.empty:
-                day_df["month"] = day_df["측정일시"].dt.to_period("M")
-                day_df["weekday"] = day_df["측정일시"].dt.weekday
-            if not night_df.empty:
-                night_df["month"] = night_df["측정일시"].dt.to_period("M")
-                night_df["weekday"] = night_df["측정일시"].dt.weekday
-
-            pf_plot_mode = "monthly"
-            monthly_fig = None
-            if not pf_df.empty:
-                total_rows = len(pf_df)
-                pf_span = pf_df["측정일시"].max() - pf_df["측정일시"].min()
-                if total_rows <= 288:
-                    pf_plot_mode = "15min"
-                elif pf_span <= pd.Timedelta(days=92):
-                    pf_plot_mode = "daily"
-
-            if (not day_df.empty) or (not night_df.empty):
-                monthly_fig = go.Figure()
-                if pf_plot_mode == "monthly":
-                    x_ticks = None
-                    if not day_df.empty:
-                        monthly_day = day_df.groupby("month")["지상역률(%)"].mean().dropna()
-                        if not monthly_day.empty:
-                            month_index = monthly_day.index.sort_values()
-                            month_x = [m.to_timestamp() for m in month_index]
-                            x_ticks = month_x
-                            monthly_fig.add_trace(
-                            go.Scatter(
-                                x=month_x,
-                                y=monthly_day.values,
-                                mode="lines+markers",
-                                name="지상 평균 역률",
-                                line=dict(color="#14B8A6", width=2.4),
-                                marker=dict(size=6),
-                                    hovertemplate="%{x|%Y-%m} 지상 평균 %{y:.1f}%<extra></extra>",
-                                )
-                            )
-                            monthly_fig.add_hline(
-                                y=PF_DAY_THRESHOLD,
-                                line=dict(color="#F97316", dash="dash"),
-                                annotation_text=f"지상 기준 {PF_DAY_THRESHOLD:.0f}%",
-                                annotation_position="top left",
-                            )
-                    if not night_df.empty:
-                        monthly_night = night_df.groupby("month")["진상역률(%)"].mean().dropna()
-                        if not monthly_night.empty:
-                            month_index_night = monthly_night.index.sort_values()
-                            month_x_night = [m.to_timestamp() for m in month_index_night]
-                            if x_ticks is None:
-                                x_ticks = month_x_night
-                            monthly_fig.add_trace(
-                            go.Scatter(
-                                x=month_x_night,
-                                y=monthly_night.values,
-                                mode="lines+markers",
-                                name="진상 평균 역률",
-                                line=dict(color="#6366F1", width=2.4),
-                                marker=dict(size=6),
-                                    hovertemplate="%{x|%Y-%m} 진상 평균 %{y:.1f}%<extra></extra>",
-                                )
-                            )
-                            monthly_fig.add_hline(
-                                y=PF_NIGHT_THRESHOLD,
-                                line=dict(color="#DC2626", dash="dot"),
-                                annotation_text=f"진상 기준 {PF_NIGHT_THRESHOLD:.0f}%",
-                                annotation_position="top right",
-                            )
-                    monthly_fig.update_layout(
-                        template="plotly_dark",
-                        margin=dict(l=10, r=10, t=50, b=40),
+                    xaxis=dict(
+                        title=label_config["x_title"],
+                        tickfont=dict(color="#1A202C"),
+                    ),
+                    yaxis=dict(
+                        title="전력사용량 (kWh, 15분)",
+                        tickfont=dict(color="#1A202C"),
+                        range=[y_lower_bound_15, 160],
+                    ),
+                    legend=dict(
+                        orientation="h",
+                        y=1.10,
+                        x=0.5,
+                        xanchor="center",
+                        yanchor="bottom",
                         font=dict(color="#1A202C"),
-                        xaxis=dict(
-                            title="월",
-                            tickmode="array" if x_ticks else "auto",
-                            tickvals=x_ticks,
-                            ticktext=[
-                                format_month_label(pd.Timestamp(x).strftime("%Y-%m")) for x in x_ticks
-                            ]
-                            if x_ticks
-                            else None,
-                            tickfont=dict(color="#1A202C"),
-                        ),
-                        yaxis=dict(title="역률 (%)", tickfont=dict(color="#1A202C"), range=[50, 105]),
-                        legend=dict(
-                            orientation="h",
-                            y=1.10,
-                            x=0.5,
-                            xanchor="center",
-                            yanchor="bottom",
-                            font=dict(color="#1A202C"),
-                        ),
-                        paper_bgcolor="#F7FAFC",
-                        plot_bgcolor="#F7FAFC",
-                    )
-                elif pf_plot_mode == "daily":
-                    if not day_df.empty:
-                        daily_day = (
-                            day_df.groupby(day_df["측정일시"].dt.date)["지상역률(%)"].mean().dropna()
-                        )
-                        if not daily_day.empty:
-                            day_x = pd.to_datetime(daily_day.index)
-                            monthly_fig.add_trace(
-                            go.Scatter(
-                                x=day_x,
-                                y=daily_day.values,
-                                mode="lines+markers",
-                                name="지상 평균 역률",
-                                line=dict(color="#14B8A6", width=2.4),
-                                marker=dict(size=6),
-                                    hovertemplate="%{x|%Y-%m-%d} 지상 평균 %{y:.1f}%<extra></extra>",
-                                )
-                            )
-                            monthly_fig.add_hline(
-                                y=PF_DAY_THRESHOLD,
-                                line=dict(color="#F97316", dash="dash"),
-                                annotation_text=f"지상 기준 {PF_DAY_THRESHOLD:.0f}%",
-                                annotation_position="top left",
-                            )
-                    if not night_df.empty:
-                        daily_night = (
-                            night_df.groupby(night_df["측정일시"].dt.date)["진상역률(%)"].mean().dropna()
-                        )
-                        if not daily_night.empty:
-                            night_x = pd.to_datetime(daily_night.index)
-                            monthly_fig.add_trace(
-                            go.Scatter(
-                                x=night_x,
-                                y=daily_night.values,
-                                mode="lines+markers",
-                                name="진상 평균 역률",
-                                line=dict(color="#6366F1", width=2.4),
-                                marker=dict(size=6),
-                                    hovertemplate="%{x|%Y-%m-%d} 진상 평균 %{y:.1f}%<extra></extra>",
-                                )
-                            )
-                            monthly_fig.add_hline(
-                                y=PF_NIGHT_THRESHOLD,
-                                line=dict(color="#DC2626", dash="dot"),
-                                annotation_text=f"진상 기준 {PF_NIGHT_THRESHOLD:.0f}%",
-                                annotation_position="top right",
-                            )
-                    monthly_fig.update_layout(
-                        template="plotly_dark",
-                        margin=dict(l=10, r=10, t=50, b=40),
-                        font=dict(color="#1A202C"),
-                        xaxis=dict(title="날짜", tickformat="%m-%d", tickfont=dict(color="#1A202C")),
-                        yaxis=dict(title="역률 (%)", tickfont=dict(color="#1A202C"), range=[50, 105]),
-                        legend=dict(
-                            orientation="h",
-                            y=1.10,
-                            x=0.5,
-                            xanchor="center",
-                            yanchor="bottom",
-                            font=dict(color="#1A202C"),
-                        ),
-                        paper_bgcolor="#F7FAFC",
-                        plot_bgcolor="#F7FAFC",
-                    )
-                else:  # 15분 단위
-                    if not day_df.empty:
-                        day_line_df = day_df[["측정일시", "지상역률(%)"]].dropna()
-                        if not day_line_df.empty:
-                            monthly_fig.add_trace(
-                                go.Scatter(
-                                    x=day_line_df["측정일시"],
-                                    y=day_line_df["지상역률(%)"],
-                                    mode="lines+markers",
-                                    name="지상 역률",
-                                    line=dict(color="#14B8A6", width=2.4),
-                                    marker=dict(size=6, color="#14B8A6"),
-                                    hovertemplate="%{x|%m-%d %H:%M} 지상 %{y:.1f}%<extra></extra>",
-                                )
-                            )
-                            monthly_fig.add_hline(
-                                y=PF_DAY_THRESHOLD,
-                                line=dict(color="#F97316", dash="dash"),
-                                annotation_text=f"지상 기준 {PF_DAY_THRESHOLD:.0f}%",
-                                annotation_position="top left",
-                            )
-                    if not night_df.empty:
-                        night_line_df = night_df[["측정일시", "진상역률(%)"]].dropna()
-                        if not night_line_df.empty:
-                            monthly_fig.add_trace(
-                                go.Scatter(
-                                    x=night_line_df["측정일시"],
-                                    y=night_line_df["진상역률(%)"],
-                                    mode="lines+markers",
-                                    name="진상 역률",
-                                    line=dict(color="#6366F1", width=2.4),
-                                    marker=dict(size=6, color="#6366F1"),
-                                    hovertemplate="%{x|%m-%d %H:%M} 진상 %{y:.1f}%<extra></extra>",
-                                )
-                            )
-                            monthly_fig.add_hline(
-                                y=PF_NIGHT_THRESHOLD,
-                                line=dict(color="#DC2626", dash="dot"),
-                                annotation_text=f"진상 기준 {PF_NIGHT_THRESHOLD:.0f}%",
-                                annotation_position="top right",
-                            )
-                    monthly_fig.update_layout(
-                        template="plotly_dark",
-                        margin=dict(l=10, r=10, t=50, b=40),
-                        font=dict(color="#1A202C"),
-                        xaxis=dict(title="시간", tickfont=dict(color="#1A202C"), tickformat="%m-%d %H:%M"),
-                        yaxis=dict(title="역률 (%)", tickfont=dict(color="#1A202C"), range=[50, 105]),
-                        legend=dict(
-                            orientation="h",
-                            y=1.10,
-                            x=0.5,
-                            xanchor="center",
-                            yanchor="bottom",
-                            font=dict(color="#1A202C"),
-                        ),
-                        paper_bgcolor="#F7FAFC",
-                        plot_bgcolor="#F7FAFC",
-                    )
-                if not monthly_fig.data:
-                    monthly_fig = None
+                    ),
+                    paper_bgcolor="#F7FAFC",
+                    plot_bgcolor="#F7FAFC",
+                )
+            with peak_col_left:
+                st.plotly_chart(peak_fig, config={"displayModeBar": True})
 
-            day_hour_series = (
-                day_df.groupby("hour")["지상역률(%)"].mean().dropna() if not day_df.empty else pd.Series(dtype=float)
-            )
-            night_hour_series = (
-                night_df.groupby("hour")["진상역률(%)"].mean().dropna() if not night_df.empty else pd.Series(dtype=float)
-            )
-
-            trend_tab_title = PF_TREND_LABELS.get(pf_plot_mode, "월별 추이")
-            pf_tabs = st.tabs([trend_tab_title, "시간대 분석"])
-            with pf_tabs[0]:
-                if monthly_fig and monthly_fig.data:
-                    st.plotly_chart(monthly_fig, config={"displayModeBar": True}, use_container_width=True)
-                else:
-                    if pf_plot_mode == "daily":
-                        st.info("선택한 기간에 대한 일별 역률 데이터를 표시할 수 없습니다.")
-                    elif pf_plot_mode == "15min":
-                        st.info("선택한 기간에 대한 15분 단위 역률 데이터를 표시할 수 없습니다.")
-                    else:
-                        st.info("선택한 기간에 대한 월별 역률 데이터를 표시할 수 없습니다.")
-            with pf_tabs[1]:
-                if day_hour_series.empty and night_hour_series.empty:
-                    st.info("시간대별 역률 데이터를 표시할 수 없습니다.")
-                else:
-                    hour_cols = st.columns(2, gap="large")
-                    if not day_hour_series.empty:
-                        day_colors = [
-                            "#F87171" if value < PF_DAY_THRESHOLD else "#22C55E" for value in day_hour_series.values
-                        ]
-                        day_fig = go.Figure()
-                        day_fig.add_trace(
-                            go.Scatter(
-                                x=day_hour_series.index,
-                                y=day_hour_series.values,
-                                mode="lines+markers",
-                                name="지상 역률",
-                                line=dict(color="#0EA5E9", width=2.2),
-                                marker=dict(size=8, color=day_colors),
-                                hovertemplate="%{x}시 평균 %{y:.1f}%<extra></extra>",
-                            )
-                        )
-                        day_fig.add_hline(
-                            y=PF_DAY_THRESHOLD,
-                            line=dict(color="#F97316", dash="dash"),
-                            annotation_text=f"기준 {PF_DAY_THRESHOLD:.0f}%",
-                            annotation_position="top left",
-                        )
-                        day_fig.update_layout(
-                            template="plotly_dark",
-                            margin=dict(l=10, r=10, t=50, b=40),
-                            font=dict(color="#1A202C"),
-                            xaxis=dict(title="시간 (09~23시)", tickmode="linear", tick0=PF_DAY_START_HOUR, dtick=1),
-                            yaxis=dict(title="역률 (%)", range=[50, 105]),
-                            paper_bgcolor="#F7FAFC",
-                            plot_bgcolor="#F7FAFC",
-                            showlegend=False,
-                        )
-                        with hour_cols[0]:
-                            st.plotly_chart(day_fig, config={"displayModeBar": True}, use_container_width=True)
-                    else:
-                        with hour_cols[0]:
-                            st.info("주간 역률 데이터를 찾을 수 없습니다.")
-
-                    if not night_hour_series.empty:
-                        night_colors = [
-                            "#F87171" if value < PF_NIGHT_THRESHOLD else "#22C55E"
-                            for value in night_hour_series.values
-                        ]
-                        night_fig = go.Figure()
-                        night_fig.add_trace(
-                            go.Scatter(
-                                x=night_hour_series.index,
-                                y=night_hour_series.values,
-                                mode="lines+markers",
-                                name="진상 역률",
-                                line=dict(color="#6366F1", width=2.2),
-                                marker=dict(size=8, color=night_colors),
-                                hovertemplate="%{x}시 평균 %{y:.1f}%<extra></extra>",
-                            )
-                        )
-                        night_fig.add_hline(
-                            y=PF_NIGHT_THRESHOLD,
-                            line=dict(color="#DC2626", dash="dot"),
-                            annotation_text=f"기준 {PF_NIGHT_THRESHOLD:.0f}%",
-                            annotation_position="top left",
-                        )
-                        night_fig.update_layout(
-                            template="plotly_dark",
-                            margin=dict(l=10, r=10, t=50, b=40),
-                            font=dict(color="#1A202C"),
-                            xaxis=dict(title="시간 (23~08시)", tickmode="linear", tick0=0, dtick=1),
-                            yaxis=dict(title="역률 (%)", range=[50, 105]),
-                            paper_bgcolor="#F7FAFC",
-                            plot_bgcolor="#F7FAFC",
-                            showlegend=False,
-                        )
-                        with hour_cols[1]:
-                            st.plotly_chart(night_fig, config={"displayModeBar": True}, use_container_width=True)
-                    else:
-                        with hour_cols[1]:
-                            st.info("야간 역률 데이터를 찾을 수 없습니다.")
-
-            basic_charge_reference = peak_charge
-            if pd.isna(basic_charge_reference) and pd.notna(base_rate) and pd.notna(chargeable_kw):
-                basic_charge_reference = base_rate * chargeable_kw
-            if pd.isna(basic_charge_reference):
-                basic_charge_reference = 0.0
-
-            day_shortfall = max(0.0, PF_DAY_THRESHOLD - day_avg_capped) if pd.notna(day_avg_capped) else 0.0
-            day_discount_pct = max(0.0, min(day_avg_capped, PF_DAY_MAX_LIMIT) - PF_DAY_THRESHOLD) if pd.notna(day_avg_capped) else 0.0
-            night_shortfall = max(0.0, PF_NIGHT_THRESHOLD - night_avg_capped) if pd.notna(night_avg_capped) else 0.0
-
-            day_penalty_amount = basic_charge_reference * PF_PENALTY_RATE_PER_PERCENT * day_shortfall if basic_charge_reference else 0.0
-            day_discount_amount = basic_charge_reference * PF_PENALTY_RATE_PER_PERCENT * day_discount_pct if basic_charge_reference else 0.0
-            night_penalty_amount = basic_charge_reference * PF_PENALTY_RATE_PER_PERCENT * night_shortfall if basic_charge_reference else 0.0
-
-            total_penalty_amount = day_penalty_amount + night_penalty_amount
-            total_discount_amount = day_discount_amount
-            net_effect_amount = total_penalty_amount - total_discount_amount
-            savings_if_compliant = total_penalty_amount
-
-            pf_card_row_one = st.columns(4, gap="large")
-
-            day_delta_html = ""
-            if pd.notna(day_avg_actual):
-                diff = day_avg_actual - PF_DAY_THRESHOLD
-                if diff > 0:
-                    day_delta_html = f'<div class="metric-delta positive">기준 대비 +{diff:.1f}p</div>'
-                elif diff < 0:
-                    day_delta_html = f'<div class="metric-delta negative">기준 대비 {diff:.1f}p</div>'
-                else:
-                    day_delta_html = '<div class="metric-delta neutral">기준과 동일</div>'
-
-            night_delta_html = ""
-            if pd.notna(night_avg_actual):
-                diff = night_avg_actual - PF_NIGHT_THRESHOLD
-                if diff > 0:
-                    night_delta_html = f'<div class="metric-delta positive">기준 대비 +{diff:.1f}p</div>'
-                elif diff < 0:
-                    night_delta_html = f'<div class="metric-delta negative">기준 대비 {diff:.1f}p</div>'
-                else:
-                    night_delta_html = '<div class="metric-delta neutral">기준과 동일</div>'
-
-            render_metric_card(
-                pf_card_row_one[0],
-                "지상 평균 역률",
-                day_avg_actual,
-                "%",
-                decimals=1,
-                extra_html=day_delta_html,
-            )
-            render_metric_card(
-                pf_card_row_one[1],
-                "진상 평균 역률",
-                night_avg_actual,
-                "%",
-                decimals=1,
-                extra_html=night_delta_html,
-            )
-
-            day_violation_html = ""
-            if pd.notna(day_violation_ratio):
-                if day_violation_ratio > 0:
-                    day_violation_html = f'<div class="metric-delta negative">위반 {day_violation_ratio:.1f}%</div>'
-                else:
-                    day_violation_html = '<div class="metric-delta positive">위반 없음</div>'
-
-            night_violation_html = ""
-            if pd.notna(night_violation_ratio):
-                if night_violation_ratio > 0:
-                    night_violation_html = f'<div class="metric-delta negative">위반 {night_violation_ratio:.1f}%</div>'
-                else:
-                    night_violation_html = '<div class="metric-delta positive">위반 없음</div>'
-
-            render_metric_card(
-                pf_card_row_one[2],
-                "지상 위반 비중",
-                day_violation_ratio,
-                "%",
-                decimals=1,
-                extra_html=day_violation_html,
-            )
-            render_metric_card(
-                pf_card_row_one[3],
-                "진상 위반 비중",
-                night_violation_ratio,
-                "%",
-                decimals=1,
-                extra_html=night_violation_html,
-            )
-
-            pf_card_row_two = st.columns(4, gap="large")
-            render_metric_card(
-                pf_card_row_two[0],
-                "추가 요금 예상",
-                total_penalty_amount,
-                "원",
-                decimals=0,
-            )
-            render_metric_card(
-                pf_card_row_two[1],
-                "할인 예상",
-                total_discount_amount,
-                "원",
-                decimals=0,
-            )
-
-            net_effect_html = ""
-            if net_effect_amount > 0:
-                net_effect_html = '<div class="metric-delta negative">순 추가 비용</div>'
-            elif net_effect_amount < 0:
-                net_effect_html = '<div class="metric-delta positive">순 할인</div>'
-            else:
-                net_effect_html = '<div class="metric-delta neutral">변동 없음</div>'
-
-            render_metric_card(
-                pf_card_row_two[2],
-                "순 영향",
-                net_effect_amount,
-                "원",
-                decimals=0,
-                extra_html=net_effect_html,
-            )
-
-            savings_html = ""
-            if savings_if_compliant > 0:
-                savings_html = '<div class="metric-delta positive">추가 요금 절감 여지</div>'
-            render_metric_card(
-                pf_card_row_two[3],
-                "기준 준수 시 절감액",
-                savings_if_compliant,
-                "원",
-                decimals=0,
-                extra_html=savings_html,
-            )
-
-            pf_summary_lines = []
-            if pd.notna(day_avg_capped):
-                pf_summary_lines.append(f"- 지상 평균 역률(캡 적용): {format_number(day_avg_capped, 1)}% (기준 {PF_DAY_THRESHOLD:.0f}%)")
-            if pd.notna(night_avg_capped):
-                pf_summary_lines.append(f"- 진상 평균 역률(캡 적용): {format_number(night_avg_capped, 1)}% (기준 {PF_NIGHT_THRESHOLD:.0f}%)")
-            if basic_charge_reference:
-                pf_summary_lines.append(f"- 역률 요금 계산 기준 기본요금: {format_number(basic_charge_reference, 0)} 원")
-            pf_summary_lines.append(
-                "- 추가/할인 요금은 기준 대비 1%당 기본요금의 0.5%를 적용합니다. (지상: 09~23시, 진상: 23~09시)"
-            )
-            st.markdown(
-                f"""
-                <div class="card" style="margin-top:12px;">
-                    <div class="card-title">역률 계산 참고</div>
-                    <div style="font-size:13px; color:#4A5568; line-height:1.6;">
-                        {"<br>".join(pf_summary_lines)}
+        if top_records.empty:
+            with peak_col_right:
+                st.info("피크 전력 상위 데이터를 표시할 수 없습니다.")
+        else:
+            ratio = None
+            if pd.notna(peak_max_value) and pd.notna(peak_avg_value) and peak_avg_value != 0:
+                ratio = peak_max_value / peak_avg_value * 100
+            cards_html = """
+                <div style="display:flex; gap:12px; margin-bottom:12px;">
+                    <div class="card" style="flex:1; padding:12px 14px;">
+                        <div class="card-title" style="font-size:13px;">최대 전력량 (kWh)</div>
+                        <div style="font-size:24px; font-weight:600;">{max_val}</div>
+                    </div>
+                    <div class="card" style="flex:1; padding:12px 14px;">
+                        <div class="card-title" style="font-size:13px;">평균 대비</div>
+                        <div style="font-size:24px; font-weight:600;">{ratio_val}</div>
                     </div>
                 </div>
-                """,
+            """.format(
+                max_val=format_number(peak_max_value, decimals=2),
+                ratio_val=f"{ratio:,.1f}%" if ratio is not None else "-",
+            )
+            styled_df = top_records.copy()
+            styled_df["요일"] = styled_df["측정일시"].dt.dayofweek.map(WEEKDAY_LABELS)
+            styled_df["측정일시"] = styled_df["측정일시"].dt.strftime("%Y-%m-%d %H:%M")
+            styled_df["전력사용량(kWh)"] = styled_df["전력사용량(kWh)"].apply(lambda v: format_number(v, 2))
+            display_df = styled_df[["id", "측정일시", "요일", "전력사용량(kWh)"]].rename(
+                columns={
+                    "id": "ID",
+                    "측정일시": "측정일시",
+                    "요일": "요일",
+                    "전력사용량(kWh)": "전력사용량(kWh)",
+                }
+            )
+            table_css = """
+                <style>
+                .peak-table-wrap {
+                    background: rgba(255, 255, 255, 0.9);
+                    border: 1px solid rgba(148, 163, 184, 0.35);
+                    border-radius: 14px;
+                    padding: 8px 10px 2px 10px;
+                    overflow: hidden;
+                }
+                .peak-table-wrap table {
+                    width: 100%;
+                    border-collapse: collapse;
+                    color: #1A202C;
+                    font-size: 13px;
+                }
+                .peak-table-wrap thead th {
+                    text-align: left;
+                    padding: 8px 10px;
+                    font-weight: 600;
+                    color: #6366F1;
+                    border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+                }
+                .peak-table-wrap tbody td {
+                    padding: 10px 10px;
+                    border-bottom: 1px solid rgba(226, 232, 240, 0.5);
+                }
+                .peak-table-wrap tbody tr:last-child td {
+                    border-bottom: none;
+                }
+                </style>
+            """
+            table_html = display_df.to_html(index=False, border=0, classes="peak-table-table")
+            with peak_col_right:
+                st.markdown(cards_html, unsafe_allow_html=True)
+                st.markdown(table_css, unsafe_allow_html=True)
+                st.markdown(f'<div class="peak-table-wrap">{table_html}</div>', unsafe_allow_html=True)
+
+        st.markdown("### 피크 비용 분석")
+        with st.container():
+            tariff_categories = list(TARIFF_BASIC_RATES.keys())
+            default_category = DEFAULT_TARIFF_SELECTION[0] if DEFAULT_TARIFF_SELECTION[0] in tariff_categories else tariff_categories[0]
+
+            config_cols = st.columns([1.3, 1.3, 1.3, 1.0], gap="large")
+            with config_cols[0]:
+                selected_tariff = st.selectbox(
+                    "요금제",
+                    options=tariff_categories,
+                    index=tariff_categories.index(default_category),
+                    key="tab2_peak_tariff_category",
+                )
+
+            available_voltages = list_tariff_voltages(selected_tariff)
+            if not available_voltages:
+                st.warning("선택한 요금제에서 전압 정보를 찾을 수 없습니다.")
+                return
+
+            default_voltage = DEFAULT_TARIFF_SELECTION[1] if DEFAULT_TARIFF_SELECTION[1] in available_voltages else available_voltages[0]
+            with config_cols[1]:
+                selected_voltage = st.selectbox(
+                    "전압 등급",
+                    options=available_voltages,
+                    index=available_voltages.index(default_voltage),
+                    key="tab2_peak_tariff_voltage",
+                )
+
+            option_map = list_tariff_options(selected_tariff, selected_voltage)
+            option_keys = list(option_map.keys())
+            option_placeholder = "-"
+            if not option_keys:
+                selected_option = ""
+            elif len(option_keys) == 1 and option_keys[0] == "":
+                selected_option = ""
+            else:
+                default_option = DEFAULT_TARIFF_SELECTION[2] if DEFAULT_TARIFF_SELECTION[2] in option_keys else option_keys[0]
+                with config_cols[2]:
+                    selected_option = st.selectbox(
+                        "옵션",
+                        options=option_keys,
+                        index=option_keys.index(default_option),
+                        format_func=format_option_label,
+                        key="tab2_peak_tariff_option",
+                    )
+            if not option_map or (len(option_keys) == 1 and option_keys[0] == ""):
+                with config_cols[2]:
+                    st.markdown("옵션")
+                    st.markdown("<div style='font-size:14px;color:#4A5568;'>기본</div>", unsafe_allow_html=True)
+
+            base_rate = get_basic_rate(selected_tariff, selected_voltage, selected_option if option_keys else "")
+            with config_cols[3]:
+                if base_rate is not None:
+                    st.metric("기본요금 단가", f"{format_number(base_rate, 0)} 원/kW")
+                else:
+                    st.metric("기본요금 단가", "-")
+
+            if base_rate is None:
+                st.warning("선택한 조건에 해당하는 기본요금 단가를 확인할 수 없습니다.")
+                return
+
+            period_peak_kwh = pd.NA
+            period_avg_kwh = pd.NA
+            if not range_df.empty:
+                peak_val = range_df["전력사용량(kWh)"].max()
+                mean_val = range_df["전력사용량(kWh)"].mean()
+                if pd.notna(peak_val):
+                    period_peak_kwh = float(peak_val)
+                if pd.notna(mean_val):
+                    period_avg_kwh = float(mean_val)
+
+            billing_peak_kwh = pd.NA
+            billing_peak_label = "누적 최대"
+            billing_peak_display = None
+            if not eligible_df.empty:
+                try:
+                    billing_idx = eligible_df["전력사용량(kWh)"].idxmax()
+                except ValueError:
+                    billing_idx = None
+                if billing_idx is not None and pd.notna(billing_idx):
+                    billing_row = eligible_df.loc[billing_idx]
+                    billing_peak_kwh = float(billing_row["전력사용량(kWh)"])
+                    billing_ts = billing_row["측정일시"]
+                    if pd.notna(billing_ts):
+                        billing_peak_display = pd.to_datetime(billing_ts).strftime("%Y-%m-%d %H:%M")
+                        billing_peak_label = f"누적 최대 ({billing_peak_display})"
+
+            current_peak_kw_for_charge = billing_peak_kwh * 4 if pd.notna(billing_peak_kwh) else pd.NA
+            avg_kw_current = period_avg_kwh * 4 if pd.notna(period_avg_kwh) else pd.NA
+
+            demand_candidates = []
+            if pd.notna(current_peak_kw_for_charge):
+                demand_candidates.append((billing_peak_label, current_peak_kw_for_charge))
+
+            seasonal_peaks = seasonal_peak_kwh_map
+            for season_key, season_info in SEASON_GROUPS.items():
+                season_kw = seasonal_peak_kw_map.get(season_key, pd.NA)
+                if pd.notna(season_kw):
+                    demand_candidates.append((season_info["label"], season_kw))
+
+        if pd.notna(global_peak_kw) and global_peak_timestamp is not None:
+            if effective_end_ts is None or global_peak_timestamp <= effective_end_ts:
+                global_label = "연중 최대"
+                if global_peak_display:
+                    global_label = f"{global_label} ({global_peak_display})"
+                demand_candidates.append((global_label, global_peak_kw))
+
+        if not demand_candidates:
+            st.warning("청구 수요전력을 계산할 데이터를 찾을 수 없습니다.")
+            return
+
+        chargeable_label, chargeable_kw = max(demand_candidates, key=lambda item: item[1])
+        peak_charge = chargeable_kw * base_rate if pd.notna(chargeable_kw) else pd.NA
+        avg_charge = avg_kw_current * base_rate if pd.notna(avg_kw_current) else pd.NA
+        charge_gap = pd.NA
+        if pd.notna(peak_charge) and pd.notna(avg_charge):
+            charge_gap = peak_charge - avg_charge
+
+        ratio_against_avg = None
+        if pd.notna(avg_kw_current) and avg_kw_current != 0 and pd.notna(chargeable_kw):
+            ratio_against_avg = (chargeable_kw / avg_kw_current - 1) * 100
+
+        def render_metric_card(column, title, value, unit, decimals=1, extra_html=""):
+            with column:
+                if pd.isna(value):
+                    display_value = "-"
+                else:
+                    display_value = format_number(value, decimals=decimals)
+                card_parts = [
+                    '<div class="card metric-card">',
+                    f'  <div class="card-title">{title}</div>',
+                    '  <div class="metric-body">',
+                    f'    <div class="metric-value">{display_value}<span class="metric-unit-inline">{unit}</span></div>',
+                ]
+                if extra_html:
+                    card_parts.append(f"    {extra_html}")
+                else:
+                    card_parts.append('    <div class="metric-delta metric-delta-empty">&nbsp;</div>')
+                card_parts.extend(["  </div>", "</div>"])
+                st.markdown("\n".join(card_parts), unsafe_allow_html=True)
+
+        card_row_one = st.columns(3, gap="large")
+        render_metric_card(
+            card_row_one[0],
+            "기간 최대수요전력",
+            period_peak_kwh,
+            "kWh (15분)",
+            decimals=1,
+        )
+
+        if pd.notna(period_peak_kwh) and pd.notna(period_avg_kwh) and period_peak_kwh != 0:
+            diff_pct = (period_avg_kwh / period_peak_kwh - 1) * 100
+            delta_class = "positive" if diff_pct > 0 else "negative" if diff_pct < 0 else "neutral"
+            avg_delta_html = f'<div class="metric-delta {delta_class}">기간 최대 대비 <strong>{diff_pct:+.1f}%</strong></div>'
+        else:
+            avg_delta_html = ""
+
+        render_metric_card(
+            card_row_one[1],
+            "평균 수요전력",
+            period_avg_kwh,
+            "kWh (15분)",
+            decimals=1,
+            extra_html=avg_delta_html,
+        )
+
+        charge_extra_html = f'<div class="metric-delta neutral">기준: {chargeable_label}</div>'
+        render_metric_card(
+            card_row_one[2],
+            "청구 수요전력",
+            chargeable_kw,
+            "kW",
+            decimals=1,
+            extra_html=charge_extra_html,
+        )
+
+        card_row_two = st.columns(3, gap="large")
+        render_metric_card(
+            card_row_two[0],
+            "기본요금 (청구 기준)",
+            peak_charge,
+            "원",
+            decimals=0,
+        )
+        render_metric_card(
+            card_row_two[1],
+            "기본요금 (평균 가정)",
+            avg_charge,
+            "원",
+            decimals=0,
+        )
+
+        gap_html = ""
+        if pd.notna(charge_gap):
+            if charge_gap > 0:
+                gap_class = "positive"
+                label = "추가 비용"
+            elif charge_gap < 0:
+                gap_class = "negative"
+                label = "절감 효과"
+            else:
+                gap_class = "neutral"
+                label = "변동 없음"
+            gap_html = f'<div class="metric-delta {gap_class}">{label}</div>'
+        render_metric_card(
+            card_row_two[2],
+            "피크로 인한 비용 차이",
+            charge_gap,
+            "원",
+            decimals=0,
+            extra_html=gap_html,
+        )
+
+        scenario_container = st.container()
+        with scenario_container:
+            st.markdown(
+                "<div style='font-size:18px;font-weight:600;color:#1A202C;margin-bottom:8px;'>피크 변동 가정</div>",
                 unsafe_allow_html=True,
             )
+            slider_cols = st.columns([2.2, 1.8], gap="large")
+            with slider_cols[0]:
+                change_pct = st.slider(
+                    "피크 변동 가정",
+                    min_value=-20.0,
+                    max_value=20.0,
+                    value=0.0,
+                    step=0.5,
+                    format="%+.1f%%",
+                    key="tab2_peak_change_pct",
+                    help="연간 최대 수요전력이 얼마나 변한다고 가정할지 설정하세요. 감소는 음수, 증가는 양수를 사용합니다.",
+                    label_visibility="collapsed",
+                )
+            with slider_cols[1]:
+                if peak_focus_months:
+                    focus_text = " · ".join(peak_focus_months)
+                    st.markdown(
+                        f"<div style='font-size:13px;color:#4A5568;line-height:1.6;'><strong>현재 데이터 기준 피크 집중 월</strong><br>{focus_text}</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        "<div style='font-size:13px;color:#4A5568;line-height:1.6;'>현재 데이터에서 피크 집중 월 정보를 확인할 수 없습니다.</div>",
+                        unsafe_allow_html=True,
+                    )
+
+        change_factor = 1 + change_pct / 100.0
+        scenario_chargeable_kw = chargeable_kw * change_factor if pd.notna(chargeable_kw) else pd.NA
+        scenario_billing_peak_kwh = billing_peak_kwh * change_factor if pd.notna(billing_peak_kwh) else pd.NA
+        scenario_peak_charge = scenario_chargeable_kw * base_rate if pd.notna(scenario_chargeable_kw) else pd.NA
+
+        delta_kw = pd.NA
+        if pd.notna(chargeable_kw) and pd.notna(scenario_chargeable_kw):
+            delta_kw = scenario_chargeable_kw - chargeable_kw
+
+        delta_charge = pd.NA
+        if pd.notna(peak_charge) and pd.notna(scenario_peak_charge):
+            delta_charge = scenario_peak_charge - peak_charge
+
+        scenario_kw_delta_html = ""
+        if pd.notna(delta_kw):
+            if abs(delta_kw) > 1e-6:
+                kw_direction = "증가" if delta_kw > 0 else "감소"
+                kw_class = "negative" if delta_kw > 0 else "positive"
+                scenario_kw_delta_html = f'<div class="metric-delta {kw_class}">{kw_direction} {format_number(abs(delta_kw), 1)} kW</div>'
+            else:
+                scenario_kw_delta_html = '<div class="metric-delta neutral">변동 없음</div>'
+
+        scenario_charge_delta_html = ""
+        scenario_cost_effect_html = ""
+
+        scenario_cards = st.columns(3, gap="large")
+        render_metric_card(
+            scenario_cards[0],
+            "변동 적용 수요전력",
+            scenario_chargeable_kw,
+            "kW",
+            decimals=1,
+            extra_html=scenario_kw_delta_html,
+        )
+        render_metric_card(
+            scenario_cards[1],
+            "기본요금 (변동 가정)",
+            scenario_peak_charge,
+            "원",
+            decimals=0,
+            extra_html=scenario_charge_delta_html,
+        )
+        render_metric_card(
+            scenario_cards[2],
+            "비용 영향",
+            delta_charge,
+            "원",
+            decimals=0,
+            extra_html=scenario_cost_effect_html,
+        )
+
+        note_lines = []
+        if pd.notna(billing_peak_kwh):
+            if billing_peak_display:
+                note_lines.append(f"- 현재 범위까지 누적된 최대수요전력(15분): {format_number(billing_peak_kwh, 1)} kWh ({billing_peak_display})")
+            else:
+                note_lines.append(f"- 현재 범위까지 누적된 최대수요전력(15분): {format_number(billing_peak_kwh, 1)} kWh")
+        note_lines.append(f"- 청구 수요전력 기준: {chargeable_label} ({format_number(chargeable_kw, 1)} kW)")
+        if pd.notna(global_peak_kw):
+            if global_peak_display:
+                note_lines.append(f"- 연중 최대수요전력: {format_number(global_peak_kw, 1)} kW ({global_peak_display})")
+            else:
+                note_lines.append(f"- 연중 최대수요전력: {format_number(global_peak_kw, 1)} kW")
+        for season_key, season_info in SEASON_GROUPS.items():
+            value = seasonal_peaks.get(season_key, pd.NA)
+            if pd.notna(value):
+                note_lines.append(f"- {season_info['label']} 최대수요전력(15분): {format_number(value, 1)} kWh")
+            else:
+                note_lines.append(f"- {season_info['label']} 최대수요전력: 데이터 없음")
+        note_lines.append("- 청구 수요전력은 연중 최대, 하계, 동계 최대 중 가장 큰 값으로 가정했습니다.")
+        if peak_focus_months:
+            note_lines.append(f"- 최근 피크 집중 월: {', '.join(peak_focus_months)}")
+        if not eligible_df.empty:
+            eligible_start = eligible_df["측정일시"].min()
+            eligible_end = eligible_df["측정일시"].max()
+            note_lines.append(f"- 분석 데이터 범위: {eligible_start:%Y-%m-%d} ~ {eligible_end:%Y-%m-%d}")
+        if change_pct != 0:
+            if pd.notna(scenario_billing_peak_kwh):
+                note_lines.append(f"- 변동 가정 최대수요전력(15분): {format_number(scenario_billing_peak_kwh, 1)} kWh")
+            if pd.notna(scenario_chargeable_kw):
+                direction_word = "감소" if change_pct < 0 else "증가"
+                note_lines.append(f"- {abs(change_pct):.1f}% {direction_word} 시 청구 수요전력: {format_number(scenario_chargeable_kw, 1)} kW")
+            if pd.notna(scenario_peak_charge):
+                note_lines.append(f"- 변동 가정 기본요금: {format_number(scenario_peak_charge, 0)} 원")
+            if pd.notna(delta_charge):
+                if delta_charge > 0:
+                    note_lines.append(f"- 예상 추가 비용: {format_number(delta_charge, 0)} 원")
+                elif delta_charge < 0:
+                    note_lines.append(f"- 예상 절감액: {format_number(-delta_charge, 0)} 원")
+        else:
+            note_lines.append("- 피크 변동 슬라이더로 증가·감소 시나리오를 조정하며 비용 변화를 확인할 수 있습니다.")
+        if ratio_against_avg is not None:
+            note_lines.append(f"- 청구 수요전력은 평균 대비 약 {ratio_against_avg:+.1f}% 차이가 있습니다.")
+
+        note_html = "<br>".join(note_lines)
+        st.markdown(
+            f"""
+            <div class="card" style="margin-top:12px;">
+                <div class="card-title">피크 정책 참고</div>
+                <div style="font-size:13px; color:#4A5568; line-height:1.6;">
+                    {note_html}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+
+    with pf_tab:
+        st.markdown("### 역률 분석 & 페널티")
+        with st.container():
+            required_columns = {"지상역률(%)", "진상역률(%)", "지상무효전력량(kVarh)", "진상무효전력량(kVarh)"}
+            if range_df.empty or not required_columns.intersection(range_df.columns):
+                st.info("역률 분석을 위한 데이터를 찾을 수 없습니다.")
+            else:
+                pf_df = range_df.copy()
+                for col in ["지상역률(%)", "진상역률(%)", "지상무효전력량(kVarh)", "진상무효전력량(kVarh)"]:
+                    if col in pf_df.columns:
+                        pf_df[col] = pd.to_numeric(pf_df[col], errors="coerce")
+                pf_df["hour"] = pf_df["측정일시"].dt.hour
+
+                day_mask = pf_df["hour"].between(PF_DAY_START_HOUR, PF_DAY_END_HOUR - 1)
+                night_mask = ~day_mask
+
+                day_pf = pf_df.loc[day_mask, "지상역률(%)"].dropna()
+                night_pf = pf_df.loc[night_mask, "진상역률(%)"].dropna()
+
+                day_pf_capped = day_pf.clip(lower=PF_MIN_LIMIT, upper=PF_DAY_MAX_LIMIT) if not day_pf.empty else day_pf
+                night_pf_capped = night_pf.clip(lower=PF_MIN_LIMIT, upper=PF_NIGHT_MAX_LIMIT) if not night_pf.empty else night_pf
+
+                day_avg_actual = float(day_pf.mean()) if not day_pf.empty else pd.NA
+                night_avg_actual = float(night_pf.mean()) if not night_pf.empty else pd.NA
+                day_avg_capped = float(day_pf_capped.mean()) if not day_pf_capped.empty else pd.NA
+                night_avg_capped = float(night_pf_capped.mean()) if not night_pf_capped.empty else pd.NA
+
+                day_violation_ratio = float((day_pf < PF_DAY_THRESHOLD).mean() * 100) if not day_pf.empty else pd.NA
+                night_violation_ratio = float((night_pf < PF_NIGHT_THRESHOLD).mean() * 100) if not night_pf.empty else pd.NA
+
+                day_df = pf_df.loc[day_mask].copy()
+                night_df = pf_df.loc[night_mask].copy()
+                if not day_df.empty:
+                    day_df["month"] = day_df["측정일시"].dt.to_period("M")
+                    day_df["weekday"] = day_df["측정일시"].dt.weekday
+                if not night_df.empty:
+                    night_df["month"] = night_df["측정일시"].dt.to_period("M")
+                    night_df["weekday"] = night_df["측정일시"].dt.weekday
+
+                pf_plot_mode = "monthly"
+                monthly_fig = None
+                if not pf_df.empty:
+                    total_rows = len(pf_df)
+                    pf_span = pf_df["측정일시"].max() - pf_df["측정일시"].min()
+                    if total_rows <= 288:
+                        pf_plot_mode = "15min"
+                    elif pf_span <= pd.Timedelta(days=92):
+                        pf_plot_mode = "daily"
+
+                if (not day_df.empty) or (not night_df.empty):
+                    monthly_fig = go.Figure()
+                    if pf_plot_mode == "monthly":
+                        x_ticks = None
+                        if not day_df.empty:
+                            monthly_day = day_df.groupby("month")["지상역률(%)"].mean().dropna()
+                            if not monthly_day.empty:
+                                month_index = monthly_day.index.sort_values()
+                                month_x = [m.to_timestamp() for m in month_index]
+                                x_ticks = month_x
+                                monthly_fig.add_trace(
+                                go.Scatter(
+                                    x=month_x,
+                                    y=monthly_day.values,
+                                    mode="lines+markers",
+                                    name="지상 평균 역률",
+                                    line=dict(color="#14B8A6", width=2.4),
+                                    marker=dict(size=6),
+                                        hovertemplate="%{x|%Y-%m} 지상 평균 %{y:.1f}%<extra></extra>",
+                                    )
+                                )
+                                monthly_fig.add_hline(
+                                    y=PF_DAY_THRESHOLD,
+                                    line=dict(color="#F97316", dash="dash"),
+                                    annotation_text=f"지상 기준 {PF_DAY_THRESHOLD:.0f}%",
+                                    annotation_position="top left",
+                                )
+                        if not night_df.empty:
+                            monthly_night = night_df.groupby("month")["진상역률(%)"].mean().dropna()
+                            if not monthly_night.empty:
+                                month_index_night = monthly_night.index.sort_values()
+                                month_x_night = [m.to_timestamp() for m in month_index_night]
+                                if x_ticks is None:
+                                    x_ticks = month_x_night
+                                monthly_fig.add_trace(
+                                go.Scatter(
+                                    x=month_x_night,
+                                    y=monthly_night.values,
+                                    mode="lines+markers",
+                                    name="진상 평균 역률",
+                                    line=dict(color="#6366F1", width=2.4),
+                                    marker=dict(size=6),
+                                        hovertemplate="%{x|%Y-%m} 진상 평균 %{y:.1f}%<extra></extra>",
+                                    )
+                                )
+                                monthly_fig.add_hline(
+                                    y=PF_NIGHT_THRESHOLD,
+                                    line=dict(color="#DC2626", dash="dot"),
+                                    annotation_text=f"진상 기준 {PF_NIGHT_THRESHOLD:.0f}%",
+                                    annotation_position="top right",
+                                )
+                        monthly_fig.update_layout(
+                            template="plotly_dark",
+                            margin=dict(l=10, r=10, t=50, b=40),
+                            font=dict(color="#1A202C"),
+                            xaxis=dict(
+                                title="월",
+                                tickmode="array" if x_ticks else "auto",
+                                tickvals=x_ticks,
+                                ticktext=[
+                                    format_month_label(pd.Timestamp(x).strftime("%Y-%m")) for x in x_ticks
+                                ]
+                                if x_ticks
+                                else None,
+                                tickfont=dict(color="#1A202C"),
+                            ),
+                            yaxis=dict(title="역률 (%)", tickfont=dict(color="#1A202C"), range=[50, 105]),
+                            legend=dict(
+                                orientation="h",
+                                y=1.10,
+                                x=0.5,
+                                xanchor="center",
+                                yanchor="bottom",
+                                font=dict(color="#1A202C"),
+                            ),
+                            paper_bgcolor="#F7FAFC",
+                            plot_bgcolor="#F7FAFC",
+                        )
+                    elif pf_plot_mode == "daily":
+                        if not day_df.empty:
+                            daily_day = (
+                                day_df.groupby(day_df["측정일시"].dt.date)["지상역률(%)"].mean().dropna()
+                            )
+                            if not daily_day.empty:
+                                day_x = pd.to_datetime(daily_day.index)
+                                monthly_fig.add_trace(
+                                go.Scatter(
+                                    x=day_x,
+                                    y=daily_day.values,
+                                    mode="lines+markers",
+                                    name="지상 평균 역률",
+                                    line=dict(color="#14B8A6", width=2.4),
+                                    marker=dict(size=6),
+                                        hovertemplate="%{x|%Y-%m-%d} 지상 평균 %{y:.1f}%<extra></extra>",
+                                    )
+                                )
+                                monthly_fig.add_hline(
+                                    y=PF_DAY_THRESHOLD,
+                                    line=dict(color="#F97316", dash="dash"),
+                                    annotation_text=f"지상 기준 {PF_DAY_THRESHOLD:.0f}%",
+                                    annotation_position="top left",
+                                )
+                        if not night_df.empty:
+                            daily_night = (
+                                night_df.groupby(night_df["측정일시"].dt.date)["진상역률(%)"].mean().dropna()
+                            )
+                            if not daily_night.empty:
+                                night_x = pd.to_datetime(daily_night.index)
+                                monthly_fig.add_trace(
+                                go.Scatter(
+                                    x=night_x,
+                                    y=daily_night.values,
+                                    mode="lines+markers",
+                                    name="진상 평균 역률",
+                                    line=dict(color="#6366F1", width=2.4),
+                                    marker=dict(size=6),
+                                        hovertemplate="%{x|%Y-%m-%d} 진상 평균 %{y:.1f}%<extra></extra>",
+                                    )
+                                )
+                                monthly_fig.add_hline(
+                                    y=PF_NIGHT_THRESHOLD,
+                                    line=dict(color="#DC2626", dash="dot"),
+                                    annotation_text=f"진상 기준 {PF_NIGHT_THRESHOLD:.0f}%",
+                                    annotation_position="top right",
+                                )
+                        monthly_fig.update_layout(
+                            template="plotly_dark",
+                            margin=dict(l=10, r=10, t=50, b=40),
+                            font=dict(color="#1A202C"),
+                            xaxis=dict(title="날짜", tickformat="%m-%d", tickfont=dict(color="#1A202C")),
+                            yaxis=dict(title="역률 (%)", tickfont=dict(color="#1A202C"), range=[50, 105]),
+                            legend=dict(
+                                orientation="h",
+                                y=1.10,
+                                x=0.5,
+                                xanchor="center",
+                                yanchor="bottom",
+                                font=dict(color="#1A202C"),
+                            ),
+                            paper_bgcolor="#F7FAFC",
+                            plot_bgcolor="#F7FAFC",
+                        )
+                    else:  # 15분 단위
+                        if not day_df.empty:
+                            day_line_df = day_df[["측정일시", "지상역률(%)"]].dropna()
+                            if not day_line_df.empty:
+                                monthly_fig.add_trace(
+                                    go.Scatter(
+                                        x=day_line_df["측정일시"],
+                                        y=day_line_df["지상역률(%)"],
+                                        mode="lines+markers",
+                                        name="지상 역률",
+                                        line=dict(color="#14B8A6", width=2.4),
+                                        marker=dict(size=6, color="#14B8A6"),
+                                        hovertemplate="%{x|%m-%d %H:%M} 지상 %{y:.1f}%<extra></extra>",
+                                    )
+                                )
+                                monthly_fig.add_hline(
+                                    y=PF_DAY_THRESHOLD,
+                                    line=dict(color="#F97316", dash="dash"),
+                                    annotation_text=f"지상 기준 {PF_DAY_THRESHOLD:.0f}%",
+                                    annotation_position="top left",
+                                )
+                        if not night_df.empty:
+                            night_line_df = night_df[["측정일시", "진상역률(%)"]].dropna()
+                            if not night_line_df.empty:
+                                monthly_fig.add_trace(
+                                    go.Scatter(
+                                        x=night_line_df["측정일시"],
+                                        y=night_line_df["진상역률(%)"],
+                                        mode="lines+markers",
+                                        name="진상 역률",
+                                        line=dict(color="#6366F1", width=2.4),
+                                        marker=dict(size=6, color="#6366F1"),
+                                        hovertemplate="%{x|%m-%d %H:%M} 진상 %{y:.1f}%<extra></extra>",
+                                    )
+                                )
+                                monthly_fig.add_hline(
+                                    y=PF_NIGHT_THRESHOLD,
+                                    line=dict(color="#DC2626", dash="dot"),
+                                    annotation_text=f"진상 기준 {PF_NIGHT_THRESHOLD:.0f}%",
+                                    annotation_position="top right",
+                                )
+                        monthly_fig.update_layout(
+                            template="plotly_dark",
+                            margin=dict(l=10, r=10, t=50, b=40),
+                            font=dict(color="#1A202C"),
+                            xaxis=dict(title="시간", tickfont=dict(color="#1A202C"), tickformat="%m-%d %H:%M"),
+                            yaxis=dict(title="역률 (%)", tickfont=dict(color="#1A202C"), range=[50, 105]),
+                            legend=dict(
+                                orientation="h",
+                                y=1.10,
+                                x=0.5,
+                                xanchor="center",
+                                yanchor="bottom",
+                                font=dict(color="#1A202C"),
+                            ),
+                            paper_bgcolor="#F7FAFC",
+                            plot_bgcolor="#F7FAFC",
+                        )
+                    if not monthly_fig.data:
+                        monthly_fig = None
+
+                day_hour_series = (
+                    pf_df.groupby("hour")["지상역률(%)"].mean().reindex(range(24)) if not pf_df.empty else pd.Series(dtype=float)
+                )
+                night_hour_series = (
+                    pf_df.groupby("hour")["진상역률(%)"].mean().reindex(range(24)) if not pf_df.empty else pd.Series(dtype=float)
+                )
+
+                trend_tab_title = PF_TREND_LABELS.get(pf_plot_mode, "월별 추이")
+                pf_tabs = st.tabs([trend_tab_title, "시간대 분석"])
+                with pf_tabs[0]:
+                    if monthly_fig and monthly_fig.data:
+                        st.plotly_chart(monthly_fig, config={"displayModeBar": True}, use_container_width=True)
+                    else:
+                        if pf_plot_mode == "daily":
+                            st.info("선택한 기간에 대한 일별 역률 데이터를 표시할 수 없습니다.")
+                        elif pf_plot_mode == "15min":
+                            st.info("선택한 기간에 대한 15분 단위 역률 데이터를 표시할 수 없습니다.")
+                        else:
+                            st.info("선택한 기간에 대한 월별 역률 데이터를 표시할 수 없습니다.")
+                with pf_tabs[1]:
+                    day_hour_has_data = not day_hour_series.dropna().empty
+                    night_hour_has_data = not night_hour_series.dropna().empty
+                    if not day_hour_has_data and not night_hour_has_data:
+                        st.info("시간대별 역률 데이터를 표시할 수 없습니다.")
+                    else:
+                        hour_cols = st.columns(2, gap="large")
+                        if day_hour_has_data:
+                            day_plot_df = day_hour_series.reset_index()
+                            day_plot_df.columns = ["hour", "power_factor"]
+                            day_plot_df = day_plot_df.dropna()
+                            day_y_range = [50, 105]
+                            if not day_plot_df.empty:
+                                day_min = float(day_plot_df["power_factor"].min())
+                                day_max = float(day_plot_df["power_factor"].max())
+                                buffer = 5.0
+                                y_min = max(0.0, day_min - buffer)
+                                y_max = min(110.0, day_max + buffer)
+                                if y_min >= y_max:
+                                    y_max = min(110.0, y_min + buffer)
+                                day_y_range = [y_min, y_max]
+                            day_colors = [
+                                "#F87171" if value < PF_DAY_THRESHOLD else "#22C55E"
+                                for value in day_plot_df["power_factor"]
+                            ]
+                            day_fig = go.Figure()
+                            day_fig.add_trace(
+                                go.Scatter(
+                                    x=day_plot_df["hour"],
+                                    y=day_plot_df["power_factor"],
+                                    mode="lines+markers",
+                                    name="지상 역률",
+                                    line=dict(color="#0EA5E9", width=2.2),
+                                    marker=dict(size=8, color=day_colors),
+                                    hovertemplate="%{x}시 평균 %{y:.1f}%<extra></extra>",
+                                )
+                            )
+                            # Dim periods outside KEPCO day-time window
+                            if PF_DAY_START_HOUR > 0:
+                                day_fig.add_vrect(
+                                    x0=-0.5,
+                                    x1=PF_DAY_START_HOUR - 0.5,
+                                    fillcolor="rgba(30, 41, 59, 0.10)",
+                                    line_width=0,
+                                    layer="below",
+                                )
+                            if PF_DAY_END_HOUR <= 23:
+                                day_fig.add_vrect(
+                                    x0=PF_DAY_END_HOUR - 0.5,
+                                    x1=23.5,
+                                    fillcolor="rgba(30, 41, 59, 0.10)",
+                                    line_width=0,
+                                    layer="below",
+                                )
+                            day_fig.add_hline(
+                                y=PF_DAY_THRESHOLD,
+                                line=dict(color="#DC2626", dash="dash"),
+                                annotation_text=f"기준 {PF_DAY_THRESHOLD:.0f}%",
+                                annotation_position="top left",
+                            )
+                            day_fig.update_layout(
+                                template="plotly_dark",
+                                margin=dict(l=10, r=10, t=50, b=40),
+                                font=dict(color="#1A202C"),
+                                xaxis=dict(
+                                    title="시간 (00~23시)",
+                                    tickmode="linear",
+                                    tick0=0,
+                                    dtick=1,
+                                    range=[-0.5, 23.5],
+                                ),
+                                yaxis=dict(title="역률 (%)", range=day_y_range),
+                                paper_bgcolor="#F7FAFC",
+                                plot_bgcolor="#F7FAFC",
+                                showlegend=False,
+                            )
+                            with hour_cols[0]:
+                                st.markdown("###### 지상 역률")
+                                st.plotly_chart(day_fig, config={"displayModeBar": True}, use_container_width=True)
+                        else:
+                            with hour_cols[0]:
+                                st.info("주간 역률 데이터를 찾을 수 없습니다.")
+
+                        if night_hour_has_data:
+                            night_plot_df = night_hour_series.reset_index()
+                            night_plot_df.columns = ["hour", "power_factor"]
+                            night_plot_df = night_plot_df.dropna()
+                            night_y_range = [50, 105]
+                            if not night_plot_df.empty:
+                                night_min = float(night_plot_df["power_factor"].min())
+                                night_max = float(night_plot_df["power_factor"].max())
+                                buffer = 5.0
+                                y_min = max(0.0, night_min - buffer)
+                                y_max = min(110.0, night_max + buffer)
+                                if y_min >= y_max:
+                                    y_max = min(110.0, y_min + buffer)
+                                night_y_range = [y_min, y_max]
+                            night_colors = [
+                                "#F87171" if value < PF_NIGHT_THRESHOLD else "#22C55E"
+                                for value in night_plot_df["power_factor"]
+                            ]
+                            night_fig = go.Figure()
+                            night_fig.add_trace(
+                                go.Scatter(
+                                    x=night_plot_df["hour"],
+                                    y=night_plot_df["power_factor"],
+                                    mode="lines+markers",
+                                    name="진상 역률",
+                                    line=dict(color="#6366F1", width=2.2),
+                                    marker=dict(size=8, color=night_colors),
+                                    hovertemplate="%{x}시 평균 %{y:.1f}%<extra></extra>",
+                                )
+                            )
+                            # Dim periods outside KEPCO night-time window
+                            night_fig.add_vrect(
+                                x0=PF_DAY_START_HOUR - 0.5,
+                                x1=PF_DAY_END_HOUR - 0.5,
+                                fillcolor="rgba(30, 41, 59, 0.10)",
+                                line_width=0,
+                                layer="below",
+                            )
+                            night_fig.add_hline(
+                                y=PF_NIGHT_THRESHOLD,
+                                line=dict(color="#DC2626", dash="dot"),
+                                annotation_text=f"기준 {PF_NIGHT_THRESHOLD:.0f}%",
+                                annotation_position="top left",
+                            )
+                            night_fig.update_layout(
+                                template="plotly_dark",
+                                margin=dict(l=10, r=10, t=50, b=40),
+                                font=dict(color="#1A202C"),
+                                xaxis=dict(
+                                    title="시간 (00~23시)",
+                                    tickmode="linear",
+                                    tick0=0,
+                                    dtick=1,
+                                    range=[-0.5, 23.5],
+                                ),
+                                yaxis=dict(title="역률 (%)", range=night_y_range),
+                                paper_bgcolor="#F7FAFC",
+                                plot_bgcolor="#F7FAFC",
+                                showlegend=False,
+                            )
+                            with hour_cols[1]:
+                                st.markdown("###### 진상 역률")
+                                st.plotly_chart(night_fig, config={"displayModeBar": True}, use_container_width=True)
+                        else:
+                            with hour_cols[1]:
+                                st.info("야간 역률 데이터를 찾을 수 없습니다.")
+
+                basic_charge_reference = peak_charge
+                if pd.isna(basic_charge_reference) and pd.notna(base_rate) and pd.notna(chargeable_kw):
+                    basic_charge_reference = base_rate * chargeable_kw
+                if pd.isna(basic_charge_reference):
+                    basic_charge_reference = 0.0
+
+                day_shortfall = max(0.0, PF_DAY_THRESHOLD - day_avg_capped) if pd.notna(day_avg_capped) else 0.0
+                day_discount_pct = max(0.0, min(day_avg_capped, PF_DAY_MAX_LIMIT) - PF_DAY_THRESHOLD) if pd.notna(day_avg_capped) else 0.0
+                night_shortfall = max(0.0, PF_NIGHT_THRESHOLD - night_avg_capped) if pd.notna(night_avg_capped) else 0.0
+
+                day_penalty_amount = basic_charge_reference * PF_PENALTY_RATE_PER_PERCENT * day_shortfall if basic_charge_reference else 0.0
+                day_discount_amount = basic_charge_reference * PF_PENALTY_RATE_PER_PERCENT * day_discount_pct if basic_charge_reference else 0.0
+                night_penalty_amount = basic_charge_reference * PF_PENALTY_RATE_PER_PERCENT * night_shortfall if basic_charge_reference else 0.0
+
+                total_penalty_amount = day_penalty_amount + night_penalty_amount
+                total_discount_amount = day_discount_amount
+                net_effect_amount = total_penalty_amount - total_discount_amount
+                savings_if_compliant = total_penalty_amount
+
+                pf_card_row_one = st.columns(4, gap="large")
+
+                day_delta_html = ""
+                if pd.notna(day_avg_actual):
+                    diff = day_avg_actual - PF_DAY_THRESHOLD
+                    if diff > 0:
+                        day_delta_html = f'<div class="metric-delta positive">기준 대비 +{diff:.1f}p</div>'
+                    elif diff < 0:
+                        day_delta_html = f'<div class="metric-delta negative">기준 대비 {diff:.1f}p</div>'
+                    else:
+                        day_delta_html = '<div class="metric-delta neutral">기준과 동일</div>'
+
+                night_delta_html = ""
+                if pd.notna(night_avg_actual):
+                    diff = night_avg_actual - PF_NIGHT_THRESHOLD
+                    if diff > 0:
+                        night_delta_html = f'<div class="metric-delta positive">기준 대비 +{diff:.1f}p</div>'
+                    elif diff < 0:
+                        night_delta_html = f'<div class="metric-delta negative">기준 대비 {diff:.1f}p</div>'
+                    else:
+                        night_delta_html = '<div class="metric-delta neutral">기준과 동일</div>'
+
+                render_metric_card(
+                    pf_card_row_one[0],
+                    "지상 평균 역률",
+                    day_avg_actual,
+                    "%",
+                    decimals=1,
+                    extra_html=day_delta_html,
+                )
+                render_metric_card(
+                    pf_card_row_one[1],
+                    "진상 평균 역률",
+                    night_avg_actual,
+                    "%",
+                    decimals=1,
+                    extra_html=night_delta_html,
+                )
+
+                day_violation_html = ""
+                if pd.notna(day_violation_ratio):
+                    if day_violation_ratio > 0:
+                        day_violation_html = f'<div class="metric-delta negative">위반 {day_violation_ratio:.1f}%</div>'
+                    else:
+                        day_violation_html = '<div class="metric-delta positive">위반 없음</div>'
+
+                night_violation_html = ""
+                if pd.notna(night_violation_ratio):
+                    if night_violation_ratio > 0:
+                        night_violation_html = f'<div class="metric-delta negative">위반 {night_violation_ratio:.1f}%</div>'
+                    else:
+                        night_violation_html = '<div class="metric-delta positive">위반 없음</div>'
+
+                render_metric_card(
+                    pf_card_row_one[2],
+                    "지상 위반 비중",
+                    day_violation_ratio,
+                    "%",
+                    decimals=1,
+                    extra_html=day_violation_html,
+                )
+                render_metric_card(
+                    pf_card_row_one[3],
+                    "진상 위반 비중",
+                    night_violation_ratio,
+                    "%",
+                    decimals=1,
+                    extra_html=night_violation_html,
+                )
+
+                pf_card_row_two = st.columns(4, gap="large")
+                render_metric_card(
+                    pf_card_row_two[0],
+                    "추가 요금 예상",
+                    total_penalty_amount,
+                    "원",
+                    decimals=0,
+                )
+                render_metric_card(
+                    pf_card_row_two[1],
+                    "할인 예상",
+                    total_discount_amount,
+                    "원",
+                    decimals=0,
+                )
+
+                net_effect_html = ""
+                if net_effect_amount > 0:
+                    net_effect_html = '<div class="metric-delta negative">순 추가 비용</div>'
+                elif net_effect_amount < 0:
+                    net_effect_html = '<div class="metric-delta positive">순 할인</div>'
+                else:
+                    net_effect_html = '<div class="metric-delta neutral">변동 없음</div>'
+
+                render_metric_card(
+                    pf_card_row_two[2],
+                    "순 영향",
+                    net_effect_amount,
+                    "원",
+                    decimals=0,
+                    extra_html=net_effect_html,
+                )
+
+                savings_html = ""
+                if savings_if_compliant > 0:
+                    savings_html = '<div class="metric-delta positive">추가 요금 절감 여지</div>'
+                render_metric_card(
+                    pf_card_row_two[3],
+                    "기준 준수 시 절감액",
+                    savings_if_compliant,
+                    "원",
+                    decimals=0,
+                    extra_html=savings_html,
+                )
+
+                pf_summary_lines = []
+                if pd.notna(day_avg_capped):
+                    pf_summary_lines.append(f"- 지상 평균 역률(캡 적용): {format_number(day_avg_capped, 1)}% (기준 {PF_DAY_THRESHOLD:.0f}%)")
+                if pd.notna(night_avg_capped):
+                    pf_summary_lines.append(f"- 진상 평균 역률(캡 적용): {format_number(night_avg_capped, 1)}% (기준 {PF_NIGHT_THRESHOLD:.0f}%)")
+                if basic_charge_reference:
+                    pf_summary_lines.append(f"- 역률 요금 계산 기준 기본요금: {format_number(basic_charge_reference, 0)} 원")
+                pf_summary_lines.append(
+                    "- 추가/할인 요금은 기준 대비 1%당 기본요금의 0.5%를 적용합니다. (지상: 09~23시, 진상: 23~09시)"
+                )
+                st.markdown(
+                    f"""
+                    <div class="card" style="margin-top:12px;">
+                        <div class="card-title">역률 계산 참고</div>
+                        <div style="font-size:13px; color:#4A5568; line-height:1.6;">
+                            {"<br>".join(pf_summary_lines)}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+
+
+    with carbon_tab:
+        # ----- 탄소 배출량 -----
+        st.markdown("### 탄소 배출량")
+        allowance_controls = st.columns([3, 1], gap="small")
+        with allowance_controls[0]:
+            allowance_per_month = st.slider(
+                "월 허용 배출량 (tCO₂)",
+                min_value=ALLOWANCE_MIN,
+                max_value=ALLOWANCE_MAX,
+                value=DEFAULT_ALLOWANCE_PER_MONTH,
+                step=ALLOWANCE_STEP,
+                key="tab2_allowance_slider",
+                help="탄소 배출권 시뮬레이터와 허용량 대비 지표에 사용될 기본 월 허용 배출량입니다.",
+            )
+        co2_price_df = load_co2_prices()
+        months_equiv = calculate_months_equiv(range_df, time_mode)
+        allowance_total = allowance_per_month * months_equiv if months_equiv > 0 else pd.NA
+        allowance_total_value = float(allowance_total) if pd.notna(allowance_total) else 0.0
+        emission_total = coalesce_number(range_df["탄소배출량(tCO2)"].sum(), 0.0) if not range_df.empty else 0.0
+        allowance_delta = emission_total - allowance_total if pd.notna(allowance_total) else pd.NA
+        emission_granularity = determine_emission_granularity(range_df, time_mode)
+        with allowance_controls[1]:
+            if pd.notna(allowance_total) and months_equiv > 0:
+                allowance_info = (
+                    f"ℹ️ 월 기준 {format_number(allowance_per_month, 1)} tCO₂ × "
+                    f"{months_equiv:.2f}개월 ≈ {format_number(allowance_total, 1)} tCO₂"
+                )
+                st.caption(allowance_info)
+            else:
+                st.caption("ℹ️ 허용량 계산 불가 (기간 확인)")
+
+        def build_allowance_delta_html(delta_value):
+            if pd.isna(delta_value):
+                return '<div class="metric-delta neutral">허용량 설정 필요</div>'
+            if delta_value > 0:
+                return f'<div class="metric-delta negative">허용량 초과 {format_number(delta_value, 1)} tCO₂</div>'
+            if delta_value < 0:
+                return f'<div class="metric-delta positive">여유 {format_number(-delta_value, 1)} tCO₂</div>'
+            return '<div class="metric-delta neutral">허용량과 동일</div>'
+
+        carbon_summary_cards = st.columns(3, gap="large")
+        render_metric_card(
+            carbon_summary_cards[0],
+            "선택 기간 총 배출량",
+            emission_total,
+            "tCO₂",
+            decimals=1,
+        )
+        render_metric_card(
+            carbon_summary_cards[1],
+            "기간 허용량 기준",
+            allowance_total,
+            "tCO₂",
+            decimals=1,
+        )
+        render_metric_card(
+            carbon_summary_cards[2],
+            "허용량 대비",
+            allowance_delta,
+            "tCO₂",
+            decimals=1,
+            extra_html=build_allowance_delta_html(allowance_delta),
+        )
+
+        if time_mode == "전체":
+            st.markdown("#### 월별 탄소 배출량 히트맵")
+            heatmap_df = monthly_summary.reset_index()[["연월", "총탄소배출량"]].copy()
+            if heatmap_df.empty:
+                st.info("월별 탄소 배출량 데이터를 찾을 수 없습니다.")
+            else:
+                heatmap_df["period"] = pd.PeriodIndex(heatmap_df["연월"], freq="M")
+                heatmap_df["year"] = heatmap_df["period"].dt.year.astype(str)
+                heatmap_df["month"] = heatmap_df["period"].dt.month
+                month_numbers = sorted(heatmap_df["month"].unique())
+                pivot = (
+                    heatmap_df.pivot(index="year", columns="month", values="총탄소배출량")
+                    .sort_index()
+                    .reindex(columns=month_numbers)
+                )
+                pivot.columns = [f"{int(m)}월" for m in month_numbers]
+                heatmap_fig = build_emission_heatmap(pivot, wrap_columns=7)
+                if heatmap_fig:
+                    st.plotly_chart(heatmap_fig, config={"displayModeBar": True}, use_container_width=True)
+                else:
+                    st.info("월별 탄소 배출량 데이터를 표시할 수 없습니다.")
+        elif time_mode == "월별":
+            if selected_month:
+                st.markdown(f"#### {format_month_label(selected_month)} 배출량 상세")
+                month_period = pd.Period(selected_month, freq="M")
+                selected_month_period = month_period
+                emission_granularity = "daily"
+                prev_key = (month_period - 1).strftime("%Y-%m")
+                prev_total = pd.NA
+                if prev_key in monthly_summary.index:
+                    prev_value = monthly_summary.loc[prev_key, "총탄소배출량"]
+                    prev_total = float(prev_value) if pd.notna(prev_value) else pd.NA
+                delta_value = emission_total - prev_total if pd.notna(prev_total) else pd.NA
+                prev_html = (
+                    '<div class="metric-delta neutral">전월 데이터 없음</div>'
+                    if pd.isna(prev_total)
+                    else ""
+                )
+                change_html = ""
+                if pd.notna(delta_value):
+                    if delta_value > 0:
+                        change_html = f'<div class="metric-delta negative">증가 {format_number(delta_value, 1)} tCO₂</div>'
+                    elif delta_value < 0:
+                        change_html = f'<div class="metric-delta positive">감소 {format_number(-delta_value, 1)} tCO₂</div>'
+                    else:
+                        change_html = '<div class="metric-delta neutral">변동 없음</div>'
+                monthly_cards = st.columns(3, gap="large")
+                render_metric_card(
+                    monthly_cards[0],
+                    "당월 배출량",
+                    emission_total,
+                    "tCO₂",
+                    decimals=1,
+                )
+                render_metric_card(
+                    monthly_cards[1],
+                    "전월 배출량",
+                    prev_total,
+                    "tCO₂",
+                    decimals=1,
+                    extra_html=prev_html,
+                )
+                render_metric_card(
+                    monthly_cards[2],
+                    "전월 대비",
+                    delta_value,
+                    "tCO₂",
+                    decimals=1,
+                    extra_html=change_html,
+                )
+
+                daily_series = (
+                    range_df.set_index("측정일시")["탄소배출량(tCO2)"]
+                    .resample("D")
+                    .sum()
+                    .reset_index()
+                )
+                if daily_series.empty:
+                    st.info("일별 배출량 데이터를 표시할 수 없습니다.")
+                else:
+                    daily_series = daily_series.sort_values("측정일시")
+                    day_numbers = daily_series["측정일시"].dt.day
+                    month_label = format_month_label(selected_month)
+                    daily_series["row_label"] = month_label
+                    daily_series["day"] = day_numbers
+                    pivot = (
+                        daily_series.pivot(index="row_label", columns="day", values="탄소배출량(tCO2)")
+                        .reindex(columns=sorted(day_numbers.unique()))
+                    )
+                    pivot.columns = [f"{int(day)}일" for day in pivot.columns]
+                heatmap_fig = build_emission_heatmap(pivot, wrap_columns=7)
+                if heatmap_fig:
+                    st.markdown("#### 일별 탄소 배출량 히트맵")
+                    st.plotly_chart(heatmap_fig, config={"displayModeBar": True}, use_container_width=True)
+        elif time_mode == "사용자 정의":
+            st.markdown("#### 사용자 정의 기간 요약")
+            unique_days = range_df["측정일시"].dt.normalize().nunique()
+            avg_daily = emission_total / unique_days if unique_days else pd.NA
+            period_start = range_df["측정일시"].min().normalize() if not range_df.empty else None
+            period_end = range_df["측정일시"].max().normalize() if not range_df.empty else None
+            comparison_total = pd.NA
+            comparison_html = '<div class="metric-delta neutral">비교 구간 없음</div>'
+            if period_start is not None and period_end is not None and raw_df is not None:
+                days_span = (period_end - period_start).days + 1
+                prev_start = period_start - pd.Timedelta(days=days_span)
+                prev_end = period_start - pd.Timedelta(days=1)
+                prev_df = raw_df[
+                    (raw_df["측정일시"] >= prev_start) & (raw_df["측정일시"] < period_start)
+                ]
+                if not prev_df.empty:
+                    comparison_total = prev_df["탄소배출량(tCO2)"].sum()
+                    diff_vs_prev = emission_total - comparison_total
+                    if diff_vs_prev > 0:
+                        comparison_html = f'<div class="metric-delta negative">직전 대비 +{format_number(diff_vs_prev, 1)} tCO₂</div>'
+                    elif diff_vs_prev < 0:
+                        comparison_html = f'<div class="metric-delta positive">직전 대비 {format_number(diff_vs_prev, 1)} tCO₂</div>'
+                    else:
+                        comparison_html = '<div class="metric-delta neutral">직전 기간과 동일</div>'
+
+            custom_cards = st.columns(3, gap="large")
+            render_metric_card(
+                custom_cards[0],
+                "기간 총 배출량",
+                emission_total,
+                "tCO₂",
+                decimals=1,
+            )
+            render_metric_card(
+                custom_cards[1],
+                "일평균 배출량",
+                avg_daily,
+                "tCO₂",
+                decimals=2,
+            )
+            render_metric_card(
+                custom_cards[2],
+                "직전 동일기간 대비",
+                comparison_total,
+                "tCO₂",
+                decimals=1,
+                extra_html=comparison_html,
+            )
+
+            heatmap_series = range_df.set_index("측정일시")["탄소배출량(tCO2)"]
+            if heatmap_series.empty:
+                st.info("선택한 기간에 대한 배출량 데이터를 표시할 수 없습니다.")
+            else:
+                heatmap_fig = None
+                heatmap_title = "#### 탄소 배출량 히트맵"
+                if emission_granularity == "hourly":
+                    hourly = (
+                        heatmap_series.resample("H").sum(min_count=1).reset_index().sort_values("측정일시")
+                    )
+                    if not hourly.empty:
+                        hourly["date"] = hourly["측정일시"].dt.normalize()
+                        hourly["hour_label"] = hourly["측정일시"].dt.strftime("%H:%M")
+                        pivot = (
+                            hourly.pivot(index="date", columns="hour_label", values="탄소배출량(tCO2)")
+                            .sort_index()
+                        )
+                        hour_order = sorted(pivot.columns, key=lambda x: x)
+                        pivot = pivot.reindex(columns=hour_order)
+                        pivot.index = pivot.index.strftime("%m-%d")
+                        heatmap_fig = build_emission_heatmap(pivot)
+                        heatmap_title = "#### 시간대별 탄소 배출량 히트맵"
+                elif emission_granularity == "daily":
+                    daily = (
+                        heatmap_series.resample("D").sum(min_count=1).reset_index().sort_values("측정일시")
+                    )
+                    if not daily.empty:
+                        daily["col_label"] = daily["측정일시"].dt.strftime("%m-%d")
+                        col_labels = daily["col_label"].tolist()
+                        pivot = (
+                            daily.assign(row_label="선택 기간")
+                            .pivot(index="row_label", columns="col_label", values="탄소배출량(tCO2)")
+                            .reindex(columns=col_labels)
+                        )
+                        heatmap_fig = build_emission_heatmap(pivot, wrap_columns=7)
+                        heatmap_title = "#### 일별 탄소 배출량 히트맵"
+                elif emission_granularity == "weekly":
+                    weekly = (
+                        heatmap_series.resample("W-MON", label="left", closed="left")
+                        .sum(min_count=1)
+                        .reset_index()
+                        .sort_values("측정일시")
+                    )
+                    if not weekly.empty:
+                        data_end = heatmap_series.index.max()
+                        weekly["week_end"] = weekly["측정일시"] + pd.Timedelta(days=6)
+                        weekly["week_end"] = weekly["week_end"].where(weekly["week_end"] <= data_end, data_end)
+                        weekly["col_label"] = weekly.apply(
+                            lambda row: build_week_range_label(row["측정일시"], row["week_end"]),
+                            axis=1,
+                        )
+                        col_labels = weekly["col_label"].tolist()
+                        pivot = (
+                            weekly.assign(row_label="선택 기간")
+                            .pivot(index="row_label", columns="col_label", values="탄소배출량(tCO2)")
+                            .reindex(columns=col_labels)
+                        )
+                        heatmap_fig = build_emission_heatmap(pivot, wrap_columns=7)
+                        heatmap_title = "#### 주별 탄소 배출량 히트맵"
+                else:
+                    monthly = (
+                        heatmap_series.resample("M").sum(min_count=1).reset_index().sort_values("측정일시")
+                    )
+                    if not monthly.empty:
+                        monthly["col_label"] = monthly["측정일시"].dt.strftime("%Y-%m")
+                        col_labels = monthly["col_label"].tolist()
+                        pivot = (
+                            monthly.assign(row_label="선택 기간")
+                            .pivot(index="row_label", columns="col_label", values="탄소배출량(tCO2)")
+                            .reindex(columns=col_labels)
+                        )
+                        heatmap_fig = build_emission_heatmap(pivot, wrap_columns=7)
+                        heatmap_title = "#### 월별 탄소 배출량 히트맵"
+                if heatmap_fig:
+                    st.markdown(heatmap_title)
+                    st.plotly_chart(heatmap_fig, config={"displayModeBar": True}, use_container_width=True)
+                else:
+                    st.info("선택한 기간에 대한 배출량 히트맵을 구성할 수 없습니다.")
+
+        # ----- 탄소배출권 시뮬레이터 -----
+        st.markdown("### 탄소배출권 시뮬레이터")
+        price_scenario_keys = list(CO2_PRICE_SCENARIOS.keys())
+        price_scenario_index = price_scenario_keys.index(DEFAULT_CO2_PRICE_SCENARIO)
+        sim_controls = st.columns([1.6, 1.4], gap="large")
+        with sim_controls[0]:
+            scenario_key = st.radio(
+                "가격 시나리오",
+                options=price_scenario_keys,
+                index=price_scenario_index,
+                format_func=lambda k: CO2_PRICE_SCENARIOS[k]["label"],
+                horizontal=True,
+                key="tab2_co2_price_scenario",
+            )
+        price_reference_date = None
+        if not range_df.empty:
+            price_reference_date = range_df["측정일시"].max().normalize()
+        if time_mode == "월별" and selected_month:
+            month_period = pd.Period(selected_month, freq="M")
+            price_reference_date = month_period.to_timestamp(how="end").normalize()
+        price_date, price_value = pick_co2_price(co2_price_df, scenario_key, price_reference_date)
+        scenario_label = CO2_PRICE_SCENARIOS[scenario_key]["label"]
+        price_display = format_number(price_value, 0) if price_value is not None else "-"
+        with sim_controls[1]:
+            if price_value is None:
+                st.caption("ℹ️ 탄소배출권 가격 데이터를 찾을 수 없습니다.")
+            else:
+                price_day = price_date.strftime("%Y-%m-%d") if price_date is not None else "최신"
+                st.caption(
+                    f"ℹ️ {scenario_label} 기준 {price_day} · {price_display} 원/tCO₂"
+                )
+
+        excess_amount = max(allowance_delta, 0) if pd.notna(allowance_delta) else pd.NA
+        surplus_amount = max(-allowance_delta, 0) if pd.notna(allowance_delta) else pd.NA
+        purchase_cost = (
+            excess_amount * price_value if price_value is not None and pd.notna(excess_amount) else pd.NA
+        )
+        sale_revenue = (
+            surplus_amount * price_value if price_value is not None and pd.notna(surplus_amount) else pd.NA
+        )
+
+        sim_cards = st.columns(4, gap="large")
+        render_metric_card(
+            sim_cards[0],
+            "초과 배출량",
+            excess_amount,
+            "tCO₂",
+            decimals=1,
+        )
+        render_metric_card(
+            sim_cards[1],
+            "잔여 배출량",
+            surplus_amount,
+            "tCO₂",
+            decimals=1,
+        )
+        render_metric_card(
+            sim_cards[2],
+            "추정 매입 비용",
+            purchase_cost,
+            "원",
+            decimals=0,
+            extra_html=f'<div class="metric-delta neutral">{scenario_label} 기준</div>' if price_value else "",
+        )
+        render_metric_card(
+            sim_cards[3],
+            "추정 판매 수익",
+            sale_revenue,
+            "원",
+            decimals=0,
+            extra_html=f'<div class="metric-delta neutral">{scenario_label} 기준</div>' if price_value else "",
+        )
+
+        chart_cols = st.columns([1, 1.6], gap="large")
+        with chart_cols[0]:
+            if pd.notna(allowance_total) and allowance_total > 0:
+                used_within_allowance = min(emission_total, allowance_total)
+                allowance_remaining = max(allowance_total - emission_total, 0)
+                allowance_over = max(emission_total - allowance_total, 0)
+                donut_values = [used_within_allowance]
+                donut_labels = ["사용량 (허용 내)"]
+                if allowance_remaining > 0:
+                    donut_values.append(allowance_remaining)
+                    donut_labels.append("잔여 허용량")
+                if allowance_over > 0:
+                    donut_values.append(allowance_over)
+                    donut_labels.append("초과량")
+                donut_fig = go.Figure(
+                    data=[
+                        go.Pie(
+                            values=donut_values,
+                            labels=donut_labels,
+                            hole=0.55,
+                            marker=dict(
+                                colors=[
+                                    "#2563EB",
+                                    "#F97316",
+                                    "#94A3B8",
+                                ][: len(donut_values)],
+                                line=dict(color="#F7FAFC", width=2),
+                            ),
+                            textinfo="label+percent",
+                        )
+                    ]
+                )
+                donut_fig.update_layout(
+                    template="plotly_dark",
+                    margin=dict(l=0, r=0, t=20, b=20),
+                    font=dict(color="#1A202C"),
+                    paper_bgcolor="#F7FAFC",
+                    plot_bgcolor="#F7FAFC",
+                    showlegend=False,
+                )
+                st.plotly_chart(donut_fig, config={"displayModeBar": False}, use_container_width=True)
+            else:
+                st.info("허용량이 설정되지 않아 게이지를 표시할 수 없습니다.")
+
+        with chart_cols[1]:
+            if range_df.empty:
+                st.info("기간 내 탄소 배출량 추세 데이터를 표시할 수 없습니다.")
+            else:
+                emission_series = range_df.set_index("측정일시")["탄소배출량(tCO2)"]
+                trend_df = pd.DataFrame()
+                hover_labels = []
+                x_data = None
+                allowance_label = ""
+                allowance_line_value = 0.0
+                x_axis_title = ""
+                xaxis_kwargs: dict = {}
+
+                if emission_granularity == "hourly":
+                    hourly_agg = (
+                        emission_series.resample("H").sum(min_count=1).reset_index().sort_values("측정일시")
+                    )
+                    trend_df = hourly_agg.rename(columns={"탄소배출량(tCO2)": "value"})
+                    x_data = trend_df["측정일시"]
+                    hover_labels = x_data.dt.strftime("%m-%d %H:%M").tolist()
+                    allowance_line_value = (
+                        allowance_total_value / len(trend_df) if len(trend_df) else 0.0
+                    )
+                    allowance_label = "시간 허용량"
+                    x_axis_title = "시간"
+                    xaxis_kwargs = dict(title=x_axis_title, tickformat="%m-%d\n%H:%M")
+                elif emission_granularity == "daily":
+                    daily_agg = (
+                        emission_series.resample("D").sum(min_count=1).reset_index().sort_values("측정일시")
+                    )
+                    trend_df = daily_agg.rename(columns={"탄소배출량(tCO2)": "value"})
+                    x_data = trend_df["측정일시"]
+                    hover_labels = x_data.dt.strftime("%m-%d").tolist()
+                    if time_mode == "월별" and selected_month_period is not None:
+                        calendar_days = selected_month_period.days_in_month
+                        allowance_line_value = (
+                            allowance_per_month / calendar_days if calendar_days else 0.0
+                        )
+                    else:
+                        allowance_line_value = (
+                            allowance_total_value / len(trend_df) if len(trend_df) else 0.0
+                        )
+                    allowance_label = "일 허용량"
+                    x_axis_title = "일자"
+                    xaxis_kwargs = dict(title=x_axis_title, tickformat="%m-%d")
+                elif emission_granularity == "weekly":
+                    weekly_agg = (
+                        emission_series.resample("W-MON", label="left", closed="left")
+                        .sum(min_count=1)
+                        .reset_index()
+                        .sort_values("측정일시")
+                    )
+                    trend_df = weekly_agg.rename(columns={"탄소배출량(tCO2)": "value"})
+                    if not trend_df.empty:
+                        data_end = range_df["측정일시"].max()
+                        trend_df["week_end"] = trend_df["측정일시"] + pd.Timedelta(days=6)
+                        trend_df.loc[trend_df["week_end"] > data_end, "week_end"] = data_end
+                        hover_labels = trend_df.apply(
+                            lambda row: build_week_range_label(row["측정일시"], row["week_end"]),
+                            axis=1,
+                        ).tolist()
+                    x_data = trend_df["측정일시"]
+                    tick_vals = x_data.tolist()
+                    allowance_line_value = (
+                        allowance_total_value / len(trend_df) if len(trend_df) else 0.0
+                    )
+                    allowance_label = "주 허용량"
+                    x_axis_title = "주차"
+                    xaxis_kwargs = dict(
+                        title=x_axis_title,
+                        tickmode="array",
+                        tickvals=tick_vals,
+                        ticktext=hover_labels,
+                    )
+                else:
+                    monthly_agg = (
+                        emission_series.resample("M").sum(min_count=1).reset_index().sort_values("측정일시")
+                    )
+                    trend_df = monthly_agg.rename(columns={"탄소배출량(tCO2)": "value"})
+                    x_data = trend_df["측정일시"]
+                    hover_labels = x_data.dt.strftime("%Y-%m").tolist()
+                    allowance_line_value = allowance_per_month or (
+                        allowance_total_value / len(trend_df) if len(trend_df) else 0.0
+                    )
+                    allowance_label = "월 허용량"
+                    x_axis_title = "월"
+                    xaxis_kwargs = dict(title=x_axis_title, tickformat="%Y-%m")
+
+                if trend_df.empty:
+                    st.info("기간 내 탄소 배출량 추세 데이터를 표시할 수 없습니다.")
+                else:
+                    trend_fig = go.Figure()
+                    trend_fig.add_trace(
+                        go.Bar(
+                            x=x_data,
+                            y=trend_df["value"],
+                            name="배출량",
+                            marker_color="#4F46E5",
+                            opacity=0.85,
+                            customdata=hover_labels,
+                            hovertemplate="%{customdata} : %{y:.2f} tCO₂<extra></extra>",
+                        )
+                    )
+                    if allowance_line_value > 0:
+                        trend_fig.add_trace(
+                            go.Scatter(
+                                x=x_data,
+                                y=[allowance_line_value] * len(trend_df),
+                                name=allowance_label,
+                                mode="lines",
+                                line=dict(color="#DC2626", dash="dash"),
+                                hovertemplate=f"{allowance_label} : "+"%{y:.2f} tCO₂<extra></extra>",
+                            )
+                        )
+                    trend_fig.update_layout(
+                        template="plotly_dark",
+                        margin=dict(l=10, r=10, t=40, b=40),
+                        font=dict(color="#1A202C"),
+                        xaxis=xaxis_kwargs or dict(title=x_axis_title),
+                        yaxis=dict(title="tCO₂"),
+                        paper_bgcolor="#F7FAFC",
+                        plot_bgcolor="#F7FAFC",
+                        legend=dict(orientation="h", y=1.1, x=0.5, xanchor="center"),
+                    )
+                    st.plotly_chart(trend_fig, config={"displayModeBar": True}, use_container_width=True)
