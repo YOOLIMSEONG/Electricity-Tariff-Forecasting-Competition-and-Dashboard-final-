@@ -10,6 +10,11 @@ import plotly.graph_objects as go
 import streamlit as st
 from docxtpl import DocxTemplate, InlineImage
 from docx.shared import Mm
+import matplotlib.pyplot as plt
+
+plt.rcParams['font.family'] = 'Malgun Gothic'
+plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['figure.max_open_warning'] = 50
 
 MONTH_OPTIONS = [
     ("2024-01", "2024년 1월"),
