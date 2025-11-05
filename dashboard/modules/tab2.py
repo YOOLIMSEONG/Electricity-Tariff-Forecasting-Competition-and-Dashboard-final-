@@ -3,6 +3,7 @@ from pathlib import Path
 from io import StringIO, BytesIO
 from datetime import time
 import math
+import logging
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -138,6 +139,7 @@ PF_MIN_LIMIT = 60.0
 PF_DAY_MAX_LIMIT = 95.0
 PF_NIGHT_MAX_LIMIT = 95.0
 PF_PENALTY_RATE_PER_PERCENT = 0.005
+logger = logging.getLogger(__name__)
 
 
 def format_month_label(value: str) -> str:
@@ -252,8 +254,9 @@ def figure_to_inline_image(doc: DocxTemplate, fig: go.Figure | None, width_mm: f
     if fig is None or not getattr(fig, "to_image", None) or not fig.data:
         return ""
     try:
-        image_bytes = fig.to_image(format="png", scale=2)
-    except Exception:
+        image_bytes = fig.to_image(format="png", scale=2, engine="kaleido")
+    except Exception as exc:
+        logger.warning("Failed to convert figure to image for report: %s", exc, exc_info=True)
         return ""
     return InlineImage(doc, BytesIO(image_bytes), width=Mm(width_mm))
 
