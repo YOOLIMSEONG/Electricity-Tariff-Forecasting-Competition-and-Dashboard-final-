@@ -5,7 +5,7 @@ numpy
 
 # 추가 요청
 docxtpl
-kaleido
+kaleido==0.2.1
 
 # 선택(쓰면 유지, 안 쓰면 지워도 됨)
 scikit-learn
