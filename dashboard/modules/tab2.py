@@ -2,6 +2,7 @@
 from pathlib import Path
 from io import StringIO, BytesIO
 from datetime import time
+import math
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -255,6 +256,57 @@ def figure_to_inline_image(doc: DocxTemplate, fig: go.Figure | None, width_mm: f
     except Exception:
         return ""
     return InlineImage(doc, BytesIO(image_bytes), width=Mm(width_mm))
+
+
+def prepare_figure_for_report(
+    fig: go.Figure | None,
+    *,
+    axis: str = "x",
+    dt_format: str | None = None,
+    max_ticks: int = 12,
+) -> go.Figure | None:
+    if fig is None or not getattr(fig, "data", None):
+        return fig
+    if dt_format is None:
+        return fig
+
+    fig_dict = fig.to_dict()
+    axis_key = axis
+    formatted_values: list[str] = []
+
+    for trace in fig_dict.get("data", []):
+        values = trace.get(axis_key)
+        if values is None:
+            continue
+        values_list = list(values)
+        converted = pd.to_datetime(values_list, errors="coerce")
+        formatted = []
+        for original, converted_value in zip(values_list, converted):
+            if pd.isna(converted_value):
+                formatted.append(str(original))
+            else:
+                formatted.append(converted_value.strftime(dt_format))
+        trace[axis_key] = formatted
+        formatted_values.extend(formatted)
+
+    if not formatted_values:
+        return go.Figure(fig_dict)
+
+    unique_labels = list(dict.fromkeys(formatted_values))
+    if max_ticks and len(unique_labels) > max_ticks:
+        step = math.ceil(len(unique_labels) / max_ticks)
+        unique_labels = unique_labels[::step]
+
+    layout_dict = fig_dict.setdefault("layout", {})
+    axis_layout_key = f"{axis_key}axis"
+    axis_layout = layout_dict.get(axis_layout_key, {})
+    axis_layout["type"] = "category"
+    axis_layout["tickvals"] = unique_labels
+    axis_layout["ticktext"] = unique_labels
+    if len(unique_labels) > 6:
+        axis_layout.setdefault("tickangle", -40)
+    layout_dict[axis_layout_key] = axis_layout
+    return go.Figure(fig_dict)
 
 
 def build_report_document(payload: dict) -> bytes | None:
@@ -927,6 +979,7 @@ def render(title: str = "과거 데이터 분석"):
             "tickvals": chart_df["월시작"],
             "ticktext": chart_df["표시월"],
             "tickformat": "%Y-%m",
+            "report_format": "%Y-%m",
         }
         download_name = f"analysis_{first_month}_{last_month}.docx"
         detail_source = range_df
@@ -1069,6 +1122,7 @@ def render(title: str = "과거 데이터 분석"):
             "cost_label": "전기요금 (일평균)",
             "cost_ma_label": "전기요금 (7일 이동평균)",
             "tickformat": "%Y-%m-%d",
+            "report_format": "%Y-%m-%d",
         }
 
         report_df = daily_stats[
@@ -1197,6 +1251,7 @@ def render(title: str = "과거 데이터 분석"):
                 "cost_label": "전기요금 (15분 평균)",
                 "cost_ma_label": "전기요금 (이동평균)",
                 "tickformat": "%m-%d %H:%M",
+                "report_format": "%Y-%m-%d %H:%M",
             }
             report_df = fifteen_avg[
                 ["측정일시", "전력사용량_평균", "전력사용량_평균_이동", "전기요금_평균", "전기요금_평균_이동", "탄소배출량"]
@@ -1273,6 +1328,7 @@ def render(title: str = "과거 데이터 분석"):
                 "cost_label": "전기요금 (일평균)",
                 "cost_ma_label": "전기요금 (7일 이동평균)",
                 "tickformat": "%Y-%m-%d",
+                "report_format": "%Y-%m-%d",
             }
             report_df = daily_stats[
                 [
@@ -1355,6 +1411,7 @@ def render(title: str = "과거 데이터 분석"):
                 "tickvals": chart_df["월시작"],
                 "ticktext": chart_df["표시월"],
                 "tickformat": "%Y-%m",
+                "report_format": "%Y-%m",
             }
             report_df = chart_df[
                 [
@@ -1613,7 +1670,10 @@ def render(title: str = "과거 데이터 분석"):
             paper_bgcolor="#F7FAFC",
             plot_bgcolor="#F7FAFC",
         )
-        report_payload["figures"]["trend_graph"] = daily_fig
+        report_payload["figures"]["trend_graph"] = prepare_figure_for_report(
+            daily_fig,
+            dt_format=chart_config.get("report_format"),
+        )
         st.plotly_chart(daily_fig, config={"displayModeBar": True})
 
         if detail_source.empty:
@@ -2035,7 +2095,10 @@ def render(title: str = "과거 데이터 분석"):
             if peak_axis_format:
                 peak_fig.update_xaxes(tickformat=peak_axis_format)
         with peak_col_left:
-            report_payload["figures"]["peak_graph"] = peak_fig
+            report_payload["figures"]["peak_graph"] = prepare_figure_for_report(
+                peak_fig,
+                dt_format=peak_axis_format,
+            )
             st.plotly_chart(peak_fig, config={"displayModeBar": True})
 
         if top_records.empty:
@@ -2811,7 +2874,10 @@ def render(title: str = "과거 데이터 분석"):
                 with pf_tabs[0]:
                     if monthly_fig and monthly_fig.data:
                         if "trend_graph2" not in report_payload["figures"]:
-                            report_payload["figures"]["trend_graph2"] = monthly_fig
+                            report_payload["figures"]["trend_graph2"] = prepare_figure_for_report(
+                                monthly_fig,
+                                dt_format=pf_axis_format,
+                            )
                         st.plotly_chart(monthly_fig, config={"displayModeBar": True}, use_container_width=True)
                     else:
                         if pf_plot_mode == "daily":
@@ -3690,7 +3756,10 @@ def render(title: str = "과거 데이터 분석"):
                     )
                     if emission_axis_format:
                         trend_fig.update_xaxes(tickformat=emission_axis_format)
-                    report_payload["figures"]["emission_graph"] = trend_fig
+                    report_payload["figures"]["emission_graph"] = prepare_figure_for_report(
+                        trend_fig,
+                        dt_format=emission_axis_format,
+                    )
                     st.plotly_chart(trend_fig, config={"displayModeBar": True}, use_container_width=True)
 
     range_start = None
